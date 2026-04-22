@@ -299,6 +299,7 @@ class EdgeVisitor(ast.NodeVisitor):
                         node,
                         enclosing_class_fqn=self._enclosing_class_fqn(),
                         class_bases=self._ctx.class_bases,
+                        import_table=self._ctx.import_table,
                     )
                     if pattern in ACCEPTED_PATTERNS:
                         self._miss_log.record_accepted(pattern, self._file_path)
