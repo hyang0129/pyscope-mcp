@@ -10,7 +10,7 @@ Package name on PyPI: `pyscope-mcp`. Import path: `pyscope_mcp`. Console script:
 
 Scaffold only. The query layer, index format, CLI, MCP server, and tests are all in place. The analyzer — the thing that turns source code into the raw `{caller_fqn: [callee_fqn, ...]}` dict — is **not implemented**. `pyscope_mcp/analyzer.py::build_raw` raises `NotImplementedError`.
 
-We started on pycg but dropped it: see [docs/prior-art.md](docs/prior-art.md) for the detailed reasons (Python 3.11 incompatibility, broken PyPI wheel, hard aborts on real repos) and for notes on the constraints the replacement must satisfy.
+We started on pycg but dropped it. See [docs/prior-art.md](docs/prior-art.md) for the full pivot rationale, the inherent limits of static analysis on dynamic Python, and a survey of how other code-graph MCPs solve these problems. The conventions below are the distilled takeaways — read prior-art.md for the reasoning.
 
 ## The one contract the analyzer must satisfy
 
@@ -18,12 +18,24 @@ We started on pycg but dropped it: see [docs/prior-art.md](docs/prior-art.md) fo
 def build_raw(root: Path, package: str) -> dict[str, list[str]]: ...
 ```
 
-- Keys: fully-qualified caller names (e.g. `my_pkg.module.function` or `my_pkg.module.Class.method`).
+- Keys: fully-qualified caller names, e.g. `my_pkg.module.function` or `my_pkg.module.Class.method`.
 - Values: lists of fully-qualified callees in the same form.
-- Must run on Python 3.11+ without monkey-patching the import system.
-- Must fail **per-file** rather than aborting the whole analysis when it can't parse something.
+- **Python 3.11+ native.** No monkey-patching the import system. AST-based, not import-based.
+- **Per-file error isolation.** A parse failure on one file must not abort the run — skip, warn, continue.
+- **No runtime import of target code.** pycg's fatal mistake; don't repeat it.
+- **Deterministic output.** Same repo in, same JSON out.
 
-Everything downstream (`CallGraphIndex.from_raw`, save/load, the MCP tools) already works against this shape — it's tested in `tests/test_graph.py` with a synthetic raw dict.
+Everything downstream (`CallGraphIndex.from_raw`, save/load, the MCP tools) already works against this shape — see `tests/test_graph.py`.
+
+### Symbol naming
+
+Fully-qualified dotted paths are the primary ID. Matches LSP and what downstream code expects. Don't invent alternative schemes (`{kind}:{relpath}:{name}` etc.) — they collide on overloads and break interop.
+
+### Unresolved edges (forthcoming)
+
+Dynamic patterns (string-keyed registries, `getattr`, duck typing, decorators returning callable-class instances, LLM tool-use) cannot be resolved statically. The current shape silently drops them. **Preferred direction:** keep these call sites in the graph but tag them with a confidence score (axon pattern) — either `{caller: [(callee, confidence), ...]}` or a parallel `low_confidence` dict. This is a schema change; bump the version when landing.
+
+Until that lands, absence of an edge is **weak** evidence — treat the graph as "definite edges, silent false negatives."
 
 ## Core convention: precomputed-and-saved index
 
@@ -43,17 +55,34 @@ When adding a new MCP tool that needs graph data, assume the index is already lo
 - `src/pyscope_mcp/graph.py` — `CallGraphIndex`: wraps raw dict in NetworkX digraphs, implements queries, save/load.
 - `src/pyscope_mcp/analyzer.py` — **stub**. Implement `build_raw` here.
 - `src/pyscope_mcp/cli.py` — argparse entry point with `build` and `serve` subcommands.
-- `src/pyscope_mcp/server.py` — MCP stdio server. Tools: `stats`, `reload`, `callers_of`, `callees_of`, `module_callers`, `module_callees`, `search`.
+- `src/pyscope_mcp/server.py` — MCP stdio server.
 - `tests/` — pytest; fixtures are synthetic raw dicts, not real repos.
-- `docs/prior-art.md` — what we learned from pycg and what constrains the replacement.
+- `docs/prior-art.md` — pycg post-mortem + survey of other code-graph MCPs.
+
+## MCP tool surface
+
+Currently shipping: `stats`, `reload`, `callers_of`, `callees_of`, `module_callers`, `module_callees`, `search`.
+
+Missing but recurring across every other code-graph MCP — add in this order when the analyzer lands:
+
+1. **`file_skeleton(path)`** — symbols + signatures, no bodies. Reportedly the single highest-leverage tool for agent context.
+2. **`call_chain(src, dst)`** — BFS shortest path from caller to callee.
+3. **`neighborhood(symbol, depth, token_budget)`** — bounded subgraph around a symbol, **rank-and-truncate** to the token budget (aider repo-map pattern: score candidates and drop low-rank entries until it fits). Do not dump raw subgraphs; they're useless to agents.
+4. **`impact(symbol)`** — callers + transitive callers, split direct / indirect / transitive.
+
+Conventions when adding tools:
+- No raw-query endpoints (CPGQL-style). Agents write bad queries.
+- All list-returning tools need a size cap. Large neighborhoods truncate by rank, not by arbitrary slice.
+- Don't add filesystem watching. `reload` is the invalidation contract.
 
 ## Conventions
 
 - Python 3.10+ at minimum. The analyzer must run on 3.11+ cleanly.
 - Use `from __future__ import annotations`.
-- Dependencies stay minimal: `mcp`, `networkx`, `pydantic`. Do not add heavy deps without a reason — especially do not pull in unmaintained analysis libraries.
+- Dependencies stay minimal: `mcp`, `networkx`, `pydantic`. Do not add heavy deps without a reason — especially do not pull in unmaintained analysis libraries. (No pickle caches, no regex "parsers," no LSIF.)
 - Index file format is versioned (`{"version": 1, "root": ..., "raw": {...}}`). Bump the version if the schema changes and handle old versions in `CallGraphIndex.load`.
 - `reload` is the only way the running server picks up a new index — no filesystem watching.
+- JSON on disk is fine while indexes are small and human-inspectable. If we outgrow it, move to SQLite + FTS5 before anything more exotic. SCIP export is a later option for Sourcegraph interop; not a v1 concern.
 
 ## Environment variables
 
