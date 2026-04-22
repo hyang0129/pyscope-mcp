@@ -136,6 +136,82 @@ def test_mro_diamond_depth_first_left(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Regression: nested-function scope + ABC base (issue #3)
+# ---------------------------------------------------------------------------
+
+def test_self_method_inherited_via_abc_base_cross_module(tmp_path: Path) -> None:
+    """Regression: ContractChapterWriter-style failure.
+
+    A subclass in one module extends an ABC-inheriting base from another
+    module.  A *nested* helper function inside a method calls
+    ``self.call_llm(...)``.  Before the fix, ``_enclosing_class_fqn`` walked
+    the scope stack and returned the enclosing *method* FQN (which IS in
+    ``known_fqns``) rather than the enclosing *class* FQN, so ``walk_mro``
+    was invoked with a method key, found no bases, and the call was logged as
+    ``self_method_unresolved``.
+    """
+    root = _make_package(tmp_path, "pkg", {
+        "base.py": (
+            "from abc import ABC, abstractmethod\n"
+            "\n"
+            "class LLMAgent(ABC):\n"
+            "    @abstractmethod\n"
+            "    def call_llm(self, prompt: str) -> str: ...\n"
+        ),
+        "writer.py": (
+            "from pkg.base import LLMAgent\n"
+            "\n"
+            "class ContractChapterWriter(LLMAgent):\n"
+            "    def call_llm(self, prompt: str) -> str:\n"
+            "        return 'answer'\n"
+            "    def write_chapter(self, text: str) -> str:\n"
+            "        def _inner_helper() -> str:\n"
+            "            return self.call_llm(text)\n"
+            "        return _inner_helper()\n"
+        ),
+    })
+    raw = build_raw(root, "pkg")
+    # The nested helper must resolve self.call_llm to the subclass's own override.
+    caller = "pkg.writer.ContractChapterWriter.write_chapter._inner_helper"
+    assert caller in raw, f"expected caller key {caller!r} in raw; got {sorted(raw)}"
+    assert "pkg.writer.ContractChapterWriter.call_llm" in raw[caller], (
+        f"expected self.call_llm to resolve; callees were {raw[caller]}"
+    )
+
+
+def test_self_method_inherited_in_nested_fn_resolves_to_base(tmp_path: Path) -> None:
+    """Regression companion: inherited method (not overridden) inside nested fn.
+
+    Same topology but ``call_llm`` is only defined on the base, not overridden
+    in the subclass, so the MRO walker must chase into the base class.
+    """
+    root = _make_package(tmp_path, "pkg", {
+        "base.py": (
+            "from abc import ABC\n"
+            "\n"
+            "class LLMAgent(ABC):\n"
+            "    def call_llm(self, prompt: str) -> str:\n"
+            "        return 'base'\n"
+        ),
+        "writer.py": (
+            "from pkg.base import LLMAgent\n"
+            "\n"
+            "class ContractChapterWriter(LLMAgent):\n"
+            "    def write_chapter(self, text: str) -> str:\n"
+            "        def _call_section() -> str:\n"
+            "            return self.call_llm(text)\n"
+            "        return _call_section()\n"
+        ),
+    })
+    raw = build_raw(root, "pkg")
+    caller = "pkg.writer.ContractChapterWriter.write_chapter._call_section"
+    assert caller in raw, f"expected caller key {caller!r}; got {sorted(raw)}"
+    assert "pkg.base.LLMAgent.call_llm" in raw[caller], (
+        f"expected MRO resolution to base; callees were {raw[caller]}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Indirect dispatch
 # ---------------------------------------------------------------------------
 

@@ -31,12 +31,14 @@ class EdgeVisitor(ast.NodeVisitor):
         class_bases: dict[str, list[str]],
         file_path: str = "",
         miss_log: MissLog | None = None,
+        known_classes: set[str] | None = None,
     ) -> None:
         self._ctx = ResolveCtx(
             module_fqn=module_fqn,
             import_table=import_table,
             known_fqns=known_fqns,
             class_bases=class_bases,
+            known_classes=known_classes or set(),
         )
         self._file_path = file_path
         self._miss_log = miss_log
@@ -53,12 +55,19 @@ class EdgeVisitor(ast.NodeVisitor):
         return self._ctx.module_fqn
 
     def _enclosing_class_fqn(self) -> str | None:
-        """FQN of the enclosing class, walking inside-out through the scope stack."""
+        """FQN of the enclosing class, walking inside-out through the scope stack.
+
+        Only returns a candidate if it is a known *class* FQN.  Without this
+        check a nested function such as ``Class.method._inner`` would match
+        ``Class.method`` first (a method, not a class) and hand the wrong FQN
+        to ``walk_mro``, causing all inherited ``self.X`` calls inside nested
+        helpers to be mis-classified as ``self_method_unresolved``.
+        """
         if len(self._scope_stack) < 2:
             return None
         for i in range(len(self._scope_stack) - 2, -1, -1):
             candidate = f"{self._ctx.module_fqn}.{'.'.join(self._scope_stack[:i + 1])}"
-            if candidate in self._ctx.known_fqns:
+            if candidate in self._ctx.known_classes:
                 return candidate
         return None
 

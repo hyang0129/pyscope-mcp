@@ -38,6 +38,21 @@ def collect_defs(tree: ast.Module, module_fqn: str) -> set[str]:
     return defs
 
 
+def collect_classes(tree: ast.Module, module_fqn: str) -> set[str]:
+    """Collect FQNs of top-level class definitions in this module.
+
+    Used to distinguish class FQNs from method FQNs when searching for an
+    enclosing class in the scope stack.  Only top-level classes are needed
+    because ``collect_defs`` only records one level of nesting (class →
+    method); nested classes-inside-methods are not tracked.
+    """
+    classes: set[str] = set()
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            classes.add(f"{module_fqn}.{node.name}")
+    return classes
+
+
 def collect_class_bases(
     tree: ast.Module,
     module_fqn: str,
