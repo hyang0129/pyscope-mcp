@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import ast
+import builtins
 import collections
 from collections import Counter
 
 from .resolution import attr_chain
 
 _EXEMPLAR_CAP = 50
+
+# Python builtin callable names that are safe to accept without resolution.
+# super/getattr have dedicated tags; exec/eval/compile have exec_or_eval.
+BUILTIN_FUNCTION_NAMES: frozenset[str] = (
+    frozenset(n for n in dir(builtins) if not n.startswith("_"))
+    - {"exec", "eval", "compile", "super", "getattr"}
+)
 
 # Canonical method names for built-in container / string types.
 # These are unresolvable via static analysis (the receiver could be anything);
@@ -184,6 +192,7 @@ _IO_FILE_VARS: frozenset[str] = frozenset({
 
 # Pattern tags from classify_miss that route to record_accepted (vs record_miss).
 ACCEPTED_PATTERNS: frozenset[str] = frozenset({
+    "builtin_function_call",
     "builtin_method_call", "pathlib_method_call", "futures_method_call",
     "pydantic_method_call", "pil_method_call", "wave_method_call",
     "loguru_method_call", "re_method_call", "datetime_method_call",
@@ -359,6 +368,8 @@ def classify_miss(
     if isinstance(func, ast.Name):
         if func.id in {"exec", "eval", "compile"}:
             return "exec_or_eval"
+        if func.id in BUILTIN_FUNCTION_NAMES:
+            return "builtin_function_call"
         return "bare_name_unresolved"
 
     if isinstance(func, ast.Call):
