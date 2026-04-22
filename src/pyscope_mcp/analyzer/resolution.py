@@ -130,8 +130,38 @@ class ResolveCtx:
     known_fqns: set[str]
     class_bases: dict[str, list[str]]
     known_classes: set[str] = None  # type: ignore[assignment]
+    # {class_fqn: {attr_name: inferred_class_fqn}} — populated in pass 1
+    self_attr_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
-        # Default to empty set so callers that don't supply it still work.
+        # Default to empty set/dict so callers that don't supply it still work.
         if self.known_classes is None:
             object.__setattr__(self, "known_classes", set())
+        if self.self_attr_types is None:
+            object.__setattr__(self, "self_attr_types", {})
+
+
+# ---------------------------------------------------------------------------
+# self.<attr>.<method>() resolution via __init__ type tracking
+# ---------------------------------------------------------------------------
+
+def resolve_self_attr_method(
+    attr_name: str,
+    method: str,
+    class_fqn: str,
+    ctx: ResolveCtx,
+) -> str | None:
+    """Resolve ``self.<attr>.<method>(...)`` inside a method of ``class_fqn``.
+
+    1. Look up ``attr_name`` in ``self_attr_types[class_fqn]``.
+    2. Walk MRO of the inferred attribute class to find ``method``.
+    3. Return the FQN or None (silent on any miss).
+    """
+    attr_class = ctx.self_attr_types.get(class_fqn, {}).get(attr_name)
+    if attr_class is None:
+        return None
+    # Direct hit first (avoids MRO traversal overhead).
+    candidate = f"{attr_class}.{method}"
+    if candidate in ctx.known_fqns:
+        return candidate
+    return walk_mro(attr_class, method, ctx.class_bases, ctx.known_fqns)

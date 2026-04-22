@@ -6,7 +6,13 @@ import ast
 import sys
 from pathlib import Path
 
-from .discovery import collect_class_bases, collect_classes, collect_defs, discover_modules
+from .discovery import (
+    collect_class_bases,
+    collect_classes,
+    collect_defs,
+    collect_self_attr_types,
+    discover_modules,
+)
 from .imports import build_import_table
 from .misses import MissLog
 from .visitor import EdgeVisitor
@@ -34,6 +40,7 @@ def build_with_report(
     known_fqns: set[str] = set()
     known_classes: set[str] = set()
     class_bases: dict[str, list[str]] = {}
+    self_attr_types: dict[str, dict[str, str]] = {}
 
     for fqn, path in modules.items():
         try:
@@ -52,11 +59,14 @@ def build_with_report(
             _warn(f"skipping {path}: {reason}")
             miss_log.record_skip(str(path), reason)
 
-    # Second sweep over parsed files to build class-bases, now that
-    # known_fqns is fully populated (bases in one module may reference
-    # classes in another).
+    # Second sweep over parsed files to build class-bases and self-attr types,
+    # now that known_fqns is fully populated (bases / types may reference
+    # classes in other modules).
     for fqn, tree, _path, import_table in parsed:
         class_bases.update(collect_class_bases(tree, fqn, import_table))
+        self_attr_types.update(
+            collect_self_attr_types(tree, fqn, import_table, known_fqns)
+        )
 
     miss_log.files_parsed = len(parsed)
 
@@ -72,6 +82,7 @@ def build_with_report(
                 file_path=str(path),
                 miss_log=miss_log,
                 known_classes=known_classes,
+                self_attr_types=self_attr_types,
             )
             visitor.visit(tree)
             for caller, callees in visitor.edges.items():

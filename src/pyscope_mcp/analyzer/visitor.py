@@ -10,6 +10,7 @@ from .resolution import (
     attr_chain,
     dispatcher_callable_arg,
     is_dispatcher_call,
+    resolve_self_attr_method,
     walk_mro,
 )
 
@@ -32,6 +33,7 @@ class EdgeVisitor(ast.NodeVisitor):
         file_path: str = "",
         miss_log: MissLog | None = None,
         known_classes: set[str] | None = None,
+        self_attr_types: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._ctx = ResolveCtx(
             module_fqn=module_fqn,
@@ -39,6 +41,7 @@ class EdgeVisitor(ast.NodeVisitor):
             known_fqns=known_fqns,
             class_bases=class_bases,
             known_classes=known_classes or set(),
+            self_attr_types=self_attr_types or {},
         )
         self._file_path = file_path
         self._miss_log = miss_log
@@ -106,7 +109,6 @@ class EdgeVisitor(ast.NodeVisitor):
                 class_fqn = self._enclosing_class_fqn()
                 if class_fqn is None:
                     return None
-                # Only single-hop self.x is resolvable; self.x.y loses the type.
                 if len(chain) == 2:
                     method = chain[1]
                     candidate = f"{class_fqn}.{method}"
@@ -117,6 +119,12 @@ class EdgeVisitor(ast.NodeVisitor):
                         method,
                         self._ctx.class_bases,
                         self._ctx.known_fqns,
+                    )
+                # self.<attr>.<method>(...) — three-part chain via attr type tracking.
+                if len(chain) == 3:
+                    attr_name, method = chain[1], chain[2]
+                    return resolve_self_attr_method(
+                        attr_name, method, class_fqn, self._ctx
                     )
                 return None
 
