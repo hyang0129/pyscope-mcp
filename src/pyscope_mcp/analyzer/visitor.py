@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 
-from .misses import MissLog, classify_miss, snippet
+from .misses import ACCEPTED_PATTERNS, MissLog, classify_miss, snippet
 from .resolution import (
     ResolveCtx,
     attr_chain,
@@ -267,14 +267,7 @@ class EdgeVisitor(ast.NodeVisitor):
                         enclosing_class_fqn=self._enclosing_class_fqn(),
                         class_bases=self._ctx.class_bases,
                     )
-                    if pattern in {
-                        "builtin_method_call",
-                        "pathlib_method_call",
-                        "futures_method_call",
-                        "pydantic_method_call",
-                        "pil_method_call",
-                        "wave_method_call",
-                    }:
+                    if pattern in ACCEPTED_PATTERNS:
                         self._miss_log.record_accepted(pattern, self._file_path)
                     else:
                         self._miss_log.record_miss(

@@ -20,6 +20,7 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
     "reverse", "index", "count",
     # dict
     "get", "keys", "values", "items", "update", "setdefault", "copy",
+    "fromkeys",
     # set
     "add", "discard", "union", "intersection", "difference",
     "issubset", "issuperset",
@@ -53,6 +54,7 @@ PATHLIB_METHODS: frozenset[str] = frozenset({
     "is_absolute", "is_relative_to", "samefile", "expanduser", "home", "cwd",
     "replace", "symlink_to", "hardlink_to", "readlink", "owner", "group",
     "lstat", "match",
+    "as_posix", "as_uri",
 })
 
 FUTURES_METHODS: frozenset[str] = frozenset({
@@ -65,6 +67,37 @@ PIL_METHODS: frozenset[str] = frozenset({
     "textbbox", "textsize", "text", "load_default", "truetype",
     "Draw", "alpha_composite", "crop", "rotate", "transpose", "thumbnail",
     "getpixel", "putpixel", "fromarray",
+    # ImageDraw drawing primitives
+    "rectangle", "line", "ellipse", "polygon", "arc", "chord",
+    "pieslice", "point", "rounded_rectangle",
+})
+
+# loguru Logger method names.
+LOGURU_METHODS: frozenset[str] = frozenset({
+    "info", "debug", "warning", "error", "critical", "exception",
+    "trace", "success", "log", "opt", "bind", "patch", "level",
+    "configure", "add", "remove", "complete",
+})
+
+# re module method names — covers both re.Pattern and re.Match objects.
+RE_METHODS: frozenset[str] = frozenset({
+    "search", "match", "fullmatch", "finditer", "findall",
+    "sub", "subn", "split",
+    "start", "end", "group", "groups", "groupdict", "span", "expand",
+})
+
+# datetime / date / time method names.
+# Deliberately excludes "replace" to avoid clobbering str.replace / Path.replace.
+DATETIME_METHODS: frozenset[str] = frozenset({
+    "now", "today", "utcnow", "isoformat", "strftime", "strptime",
+    "fromisoformat", "fromtimestamp", "timestamp", "date", "time",
+    "astimezone", "combine", "weekday",
+})
+
+# difflib SequenceMatcher / Differ method names.
+DIFFLIB_METHODS: frozenset[str] = frozenset({
+    "ratio", "get_matching_blocks", "get_opcodes",
+    "quick_ratio", "real_quick_ratio",
 })
 
 # wave module handle method names.
@@ -84,6 +117,14 @@ PYDANTIC_BASE_NAMES: frozenset[str] = frozenset({"BaseModel", "RootModel"})
 PYDANTIC_METHODS: frozenset[str] = frozenset({
     "model_dump", "model_dump_json", "model_validate", "model_validate_json",
     "model_copy", "model_fields",
+})
+
+# Pattern tags from classify_miss that route to record_accepted (vs record_miss).
+ACCEPTED_PATTERNS: frozenset[str] = frozenset({
+    "builtin_method_call", "pathlib_method_call", "futures_method_call",
+    "pydantic_method_call", "pil_method_call", "wave_method_call",
+    "loguru_method_call", "re_method_call", "datetime_method_call",
+    "difflib_method_call",
 })
 
 
@@ -286,6 +327,9 @@ def classify_miss(
                 return "self_method_unresolved"
             method = chain[-1]
             if chain[0] != "self":
+                # Chain-root special case: known logger variable names
+                if chain[0] in {"logger", "log", "logging"}:
+                    return "loguru_method_call"
                 if method in BUILTIN_COLLECTION_METHODS:
                     return "builtin_method_call"
                 if method in PATHLIB_METHODS:
@@ -298,6 +342,14 @@ def classify_miss(
                     return "pil_method_call"
                 if method in WAVE_METHODS:
                     return "wave_method_call"
+                if method in LOGURU_METHODS:
+                    return "loguru_method_call"
+                if method in RE_METHODS:
+                    return "re_method_call"
+                if method in DATETIME_METHODS:
+                    return "datetime_method_call"
+                if method in DIFFLIB_METHODS:
+                    return "difflib_method_call"
         else:
             # chain is None: receiver is a non-Name/non-Attribute expression
             # (e.g. BinOp, Call, Subscript).  Fall back to method-name lookup.
@@ -314,6 +366,14 @@ def classify_miss(
                 return "futures_method_call"
             if method in PYDANTIC_METHODS:
                 return "pydantic_method_call"
+            if method in LOGURU_METHODS:
+                return "loguru_method_call"
+            if method in RE_METHODS:
+                return "re_method_call"
+            if method in DATETIME_METHODS:
+                return "datetime_method_call"
+            if method in DIFFLIB_METHODS:
+                return "difflib_method_call"
         return "attr_chain_unresolved"
 
     return "other_unresolved"
