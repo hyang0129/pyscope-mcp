@@ -129,3 +129,9 @@ class ResolveCtx:
     import_table: dict[str, str]
     known_fqns: set[str]
     class_bases: dict[str, list[str]]
+    known_classes: set[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        # Default to empty set so callers that don't supply it still work.
+        if self.known_classes is None:
+            object.__setattr__(self, "known_classes", set())

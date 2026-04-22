@@ -6,7 +6,7 @@ import ast
 import sys
 from pathlib import Path
 
-from .discovery import collect_class_bases, collect_defs, discover_modules
+from .discovery import collect_class_bases, collect_classes, collect_defs, discover_modules
 from .imports import build_import_table
 from .misses import MissLog
 from .visitor import EdgeVisitor
@@ -32,6 +32,7 @@ def build_with_report(
     # Pass 1: parse all files; collect defs, import tables, class bases.
     parsed: list[tuple[str, ast.Module, Path, dict[str, str]]] = []
     known_fqns: set[str] = set()
+    known_classes: set[str] = set()
     class_bases: dict[str, list[str]] = {}
 
     for fqn, path in modules.items():
@@ -39,6 +40,7 @@ def build_with_report(
             source = path.read_text(encoding="utf-8", errors="replace")
             tree = ast.parse(source, filename=str(path))
             known_fqns.update(collect_defs(tree, fqn))
+            known_classes.update(collect_classes(tree, fqn))
             import_table = build_import_table(tree, fqn)
             parsed.append((fqn, tree, path, import_table))
         except SyntaxError as exc:
@@ -69,6 +71,7 @@ def build_with_report(
                 class_bases,
                 file_path=str(path),
                 miss_log=miss_log,
+                known_classes=known_classes,
             )
             visitor.visit(tree)
             for caller, callees in visitor.edges.items():
