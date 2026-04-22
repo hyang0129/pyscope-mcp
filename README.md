@@ -59,4 +59,4 @@ Errors out if no index exists. Env-var equivalents: `PYCG_MCP_ROOT`, `PYCG_MCP_I
 
 ## Status
 
-Alpha. Works on any Python repo that pycg can analyze. pycg is a static analyzer, so dynamic dispatch and heavy metaprogramming will degrade recall.
+Alpha. Works on any Python repo that pycg can analyze. pycg is a static analyzer, so dynamic dispatch and heavy metaprogramming will degrade recall — see [docs/pycg-limitations.md](docs/pycg-limitations.md) for the full list of patterns that defeat it and how to interpret the output.
