@@ -9,6 +9,7 @@ from .resolution import (
     ResolveCtx,
     attr_chain,
     dispatcher_callable_arg,
+    infer_call_class_type,
     is_dispatcher_call,
     resolve_self_attr_method,
     walk_mro,
@@ -100,6 +101,28 @@ class EdgeVisitor(ast.NodeVisitor):
             return None
 
         if isinstance(func_node, ast.Attribute):
+            # ClassName(...).method(...) — call on constructor result.
+            # Must be checked BEFORE attr_chain (which bails on Call receivers).
+            if isinstance(func_node.value, ast.Call):
+                inner_call = func_node.value
+                # super() is already handled above; skip it here.
+                if not (
+                    isinstance(inner_call.func, ast.Name)
+                    and inner_call.func.id == "super"
+                ):
+                    class_fqn = infer_call_class_type(inner_call, self._ctx)
+                    if class_fqn is not None:
+                        method = func_node.attr
+                        candidate = f"{class_fqn}.{method}"
+                        if candidate in self._ctx.known_fqns:
+                            return candidate
+                        return walk_mro(
+                            class_fqn,
+                            method,
+                            self._ctx.class_bases,
+                            self._ctx.known_fqns,
+                        )
+
             chain = attr_chain(func_node)
             if chain is None:
                 return None

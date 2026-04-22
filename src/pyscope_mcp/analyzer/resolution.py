@@ -142,6 +142,49 @@ class ResolveCtx:
 
 
 # ---------------------------------------------------------------------------
+# Constructor-result type inference
+# ---------------------------------------------------------------------------
+
+def infer_call_class_type(call: ast.Call, ctx: "ResolveCtx") -> str | None:
+    """If `call` is a constructor call to an in-package class, return its FQN.
+
+    Mirrors _infer_type Case 2 from discovery.py but takes a ResolveCtx.
+    Returns None for non-class callables (functions, unknowns, builtins).
+    Only returns the FQN if it is in ctx.known_classes (not just known_fqns —
+    must be a class, not a function).
+    """
+    func = call.func
+    candidate: str | None = None
+
+    if isinstance(func, ast.Name):
+        name = func.id
+        if name in ctx.import_table:
+            candidate = ctx.import_table[name]
+        else:
+            candidate = f"{ctx.module_fqn}.{name}"
+    else:
+        chain = attr_chain(func)
+        if chain is not None:
+            # Longest-prefix lookup against import table.
+            for prefix_len in range(len(chain) - 1, 0, -1):
+                prefix = ".".join(chain[:prefix_len])
+                if prefix in ctx.import_table:
+                    base_fqn = ctx.import_table[prefix]
+                    remainder = chain[prefix_len:]
+                    candidate = ".".join([base_fqn] + remainder)
+                    break
+            else:
+                candidate = ".".join(chain)
+
+    if candidate is None:
+        return None
+    # Must be a known class, not just any known FQN (no functions/modules).
+    if candidate in ctx.known_classes:
+        return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
 # self.<attr>.<method>() resolution via __init__ type tracking
 # ---------------------------------------------------------------------------
 
