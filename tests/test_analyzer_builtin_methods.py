@@ -34,6 +34,41 @@ def _parse_call(src: str) -> ast.Call:
 # Classifier unit tests (pattern tag only, no full pipeline needed)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Literal receiver tests (issue #2): '<literal>'.method(...) routing
+# ---------------------------------------------------------------------------
+
+def test_str_literal_join_is_builtin_method_call() -> None:
+    """'\\n'.join(lines) must route to builtin_method_call, not literal_method_call."""
+    call = _parse_call("'\\n'.join(lines)")
+    assert _classify_miss(call) == "builtin_method_call"
+
+
+def test_str_literal_format_is_builtin_method_call() -> None:
+    call = _parse_call("'{}'.format(x)")
+    assert _classify_miss(call) == "builtin_method_call"
+
+
+def test_str_literal_unknown_method_stays_literal_method_call() -> None:
+    """A method on a literal that is NOT in the whitelist stays literal_method_call."""
+    call = _parse_call("'hello'.not_a_real_method()")
+    assert _classify_miss(call) == "literal_method_call"
+
+
+def test_bare_name_join_is_bare_name_unresolved() -> None:
+    """foo.join(y) where foo is a bare Name must not be affected."""
+    call = _parse_call("foo.join(y)")
+    assert _classify_miss(call) == "builtin_method_call"
+
+
+def test_call_result_bit_length_is_call_on_call_result() -> None:
+    """(1+2).bit_length() — func.value is a BinOp (non-literal), bucket unchanged."""
+    call = _parse_call("(1+2).bit_length()")
+    # BinOp receiver: not a Constant, so falls through to attr_chain_unresolved
+    result = _classify_miss(call)
+    assert result not in ("builtin_method_call", "literal_method_call")
+
+
 def test_list_append_is_accepted() -> None:
     call = _parse_call("lines.append(x)")
     assert _classify_miss(call) == "builtin_method_call"
