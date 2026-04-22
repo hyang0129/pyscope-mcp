@@ -33,7 +33,10 @@ class CallGraphIndex:
         cmd = [sys.executable, "-m", "pycg", "--package", package or root.name, *files]
         out = subprocess.check_output(cmd, cwd=root, text=True)
         raw = json.loads(out)
+        return cls._from_raw(root, raw)
 
+    @classmethod
+    def _from_raw(cls, root: Path, raw: dict[str, list[str]]) -> "CallGraphIndex":
         fg: nx.DiGraph = nx.DiGraph()
         mg: nx.DiGraph = nx.DiGraph()
         for caller, callees in raw.items():
@@ -46,6 +49,25 @@ class CallGraphIndex:
                 if cm != tm:
                     mg.add_edge(cm, tm)
         return cls(root=root, function_graph=fg, module_graph=mg, raw=raw)
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "root": str(self.root),
+            "raw": self.raw,
+        }
+        path.write_text(json.dumps(payload))
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "CallGraphIndex":
+        path = Path(path)
+        payload = json.loads(path.read_text())
+        if payload.get("version") != 1:
+            raise ValueError(f"unsupported index version: {payload.get('version')}")
+        return cls._from_raw(Path(payload["root"]), payload["raw"])
 
     def callers_of(self, fqn: str, depth: int = 1) -> list[str]:
         return _bfs(self.function_graph.reverse(copy=False), fqn, depth)

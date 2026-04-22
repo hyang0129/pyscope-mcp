@@ -36,7 +36,7 @@ dev = [
 ]
 
 [project.scripts]
-pycg-mcp = "pycg_mcp.server:main"
+pycg-mcp = "pycg_mcp.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/your-org/pycg-mcp"

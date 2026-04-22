@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json as _json
 from pathlib import Path
 
 from mcp.server import Server
@@ -11,8 +11,7 @@ from mcp.types import TextContent, Tool
 from pycg_mcp.graph import CallGraphIndex
 
 _INDEX: CallGraphIndex | None = None
-_ROOT = Path(os.environ.get("PYCG_MCP_ROOT", os.getcwd())).resolve()
-_PACKAGE = os.environ.get("PYCG_MCP_PACKAGE")
+_INDEX_PATH: Path | None = None
 
 app: Server = Server("pycg-mcp")
 
@@ -20,7 +19,9 @@ app: Server = Server("pycg-mcp")
 def _get_index() -> CallGraphIndex:
     global _INDEX
     if _INDEX is None:
-        _INDEX = CallGraphIndex.build(_ROOT, package=_PACKAGE)
+        if _INDEX_PATH is None:
+            raise RuntimeError("server started without an index path")
+        _INDEX = CallGraphIndex.load(_INDEX_PATH)
     return _INDEX
 
 
@@ -30,13 +31,13 @@ async def list_tools() -> list[Tool]:
     fqn = {"type": "string", "description": "Fully-qualified name, e.g. pkg.mod.func"}
     return [
         Tool(
-            name="reindex",
-            description="Re-run pycg over the configured repo root and rebuild the graph.",
+            name="stats",
+            description="Return function/module node + edge counts for the loaded index.",
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
-            name="stats",
-            description="Return function/module node + edge counts for the current index.",
+            name="reload",
+            description="Re-read the index file from disk (use after running 'pycg-mcp build').",
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
@@ -93,8 +94,10 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     global _INDEX
-    if name == "reindex":
-        _INDEX = CallGraphIndex.build(_ROOT, package=_PACKAGE)
+    if name == "reload":
+        if _INDEX_PATH is None:
+            raise RuntimeError("server started without an index path")
+        _INDEX = CallGraphIndex.load(_INDEX_PATH)
         return _text(_INDEX.stats())
 
     idx = _get_index()
@@ -114,8 +117,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
 
 def _text(payload) -> list[TextContent]:
-    import json as _json
-
     return [TextContent(type="text", text=_json.dumps(payload, indent=2))]
 
 
@@ -124,9 +125,8 @@ async def _run() -> None:
         await app.run(read, write, app.create_initialization_options())
 
 
-def main() -> None:
+def run_stdio(index_path: Path) -> None:
+    global _INDEX_PATH, _INDEX
+    _INDEX_PATH = Path(index_path)
+    _INDEX = CallGraphIndex.load(_INDEX_PATH)
     asyncio.run(_run())
-
-
-if __name__ == "__main__":
-    main()

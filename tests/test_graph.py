@@ -31,3 +31,14 @@ def test_build_and_basic_queries(sample_repo: Path) -> None:
     assert stats["functions"] > 0
     hits = idx.search("helper")
     assert any("helper" in h for h in hits)
+
+
+def test_save_and_load_roundtrip(sample_repo: Path, tmp_path: Path) -> None:
+    idx = CallGraphIndex.build(sample_repo, package="sample")
+    out = tmp_path / "index.json"
+    idx.save(out)
+    assert out.exists()
+
+    loaded = CallGraphIndex.load(out)
+    assert loaded.stats() == idx.stats()
+    assert loaded.search("helper") == idx.search("helper")
