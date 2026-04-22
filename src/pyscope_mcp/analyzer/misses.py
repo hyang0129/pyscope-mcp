@@ -166,6 +166,11 @@ def classify_miss(node: ast.Call) -> str:
         while isinstance(cur, ast.Attribute):
             cur = cur.value
         if isinstance(cur, ast.Constant):
+            # A method called on a known literal type (str, bytes, int, float,
+            # list, dict, set, tuple) — route to builtin_method_call when the
+            # method name is in the whitelist; otherwise keep literal_method_call.
+            if isinstance(func, ast.Attribute) and func.attr in BUILTIN_COLLECTION_METHODS:
+                return "builtin_method_call"
             return "literal_method_call"
         # super().foo() — value of the outer Attribute is a Call to super()
         if isinstance(cur, ast.Call) and isinstance(cur.func, ast.Name) and cur.func.id == "super":
