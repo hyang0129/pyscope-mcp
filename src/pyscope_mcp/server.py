@@ -8,12 +8,12 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
 
-from pycg_mcp.graph import CallGraphIndex
+from pyscope_mcp.graph import CallGraphIndex
 
 _INDEX: CallGraphIndex | None = None
 _INDEX_PATH: Path | None = None
 
-app: Server = Server("pycg-mcp")
+app: Server = Server("pyscope-mcp")
 
 
 def _get_index() -> CallGraphIndex:
@@ -37,7 +37,7 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="reload",
-            description="Re-read the index file from disk (use after running 'pycg-mcp build').",
+            description="Re-read the index file from disk (use after running 'pyscope-mcp build').",
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(

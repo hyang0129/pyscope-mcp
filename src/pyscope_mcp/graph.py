@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,11 +9,12 @@ import networkx as nx
 
 @dataclass
 class CallGraphIndex:
-    """Function- and module-level call graph over a Python repo, backed by pycg.
+    """Function- and module-level call graph over a Python repo.
 
-    pycg produces a JSON mapping {caller_fqn: [callee_fqn, ...]}. We wrap that
-    in a NetworkX DiGraph so queries (callers, callees, reachability, module
-    subgraphs) are cheap after the one-shot pycg run.
+    The source of truth is `raw`: a mapping {caller_fqn: [callee_fqn, ...]}.
+    Graphs are derived from `raw` on construction and on `load`. The backend
+    that populates `raw` from source code lives in pyscope_mcp.analyzer
+    (not yet implemented — see CLAUDE.md for the rewrite plan).
     """
 
     root: Path
@@ -24,19 +23,8 @@ class CallGraphIndex:
     raw: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
-    def build(cls, root: str | Path, package: str | None = None) -> "CallGraphIndex":
+    def from_raw(cls, root: str | Path, raw: dict[str, list[str]]) -> "CallGraphIndex":
         root = Path(root).resolve()
-        files = [str(p) for p in root.rglob("*.py") if ".venv" not in p.parts]
-        if not files:
-            raise ValueError(f"no .py files found under {root}")
-
-        cmd = [sys.executable, "-m", "pycg", "--package", package or root.name, *files]
-        out = subprocess.check_output(cmd, cwd=root, text=True)
-        raw = json.loads(out)
-        return cls._from_raw(root, raw)
-
-    @classmethod
-    def _from_raw(cls, root: Path, raw: dict[str, list[str]]) -> "CallGraphIndex":
         fg: nx.DiGraph = nx.DiGraph()
         mg: nx.DiGraph = nx.DiGraph()
         for caller, callees in raw.items():
@@ -67,7 +55,7 @@ class CallGraphIndex:
         payload = json.loads(path.read_text())
         if payload.get("version") != 1:
             raise ValueError(f"unsupported index version: {payload.get('version')}")
-        return cls._from_raw(Path(payload["root"]), payload["raw"])
+        return cls.from_raw(Path(payload["root"]), payload["raw"])
 
     def callers_of(self, fqn: str, depth: int = 1) -> list[str]:
         return _bfs(self.function_graph.reverse(copy=False), fqn, depth)

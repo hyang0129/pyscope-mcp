@@ -2,42 +2,37 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from pycg_mcp.graph import CallGraphIndex
+from pyscope_mcp.graph import CallGraphIndex
 
 
-@pytest.fixture
-def sample_repo(tmp_path: Path) -> Path:
-    (tmp_path / "sample").mkdir()
-    (tmp_path / "sample" / "__init__.py").write_text("")
-    (tmp_path / "sample" / "a.py").write_text(
-        "from sample.b import helper\n"
-        "def top():\n"
-        "    return helper()\n"
-    )
-    (tmp_path / "sample" / "b.py").write_text(
-        "def helper():\n"
-        "    return inner()\n"
-        "def inner():\n"
-        "    return 1\n"
-    )
-    return tmp_path
+def _sample_raw() -> dict[str, list[str]]:
+    return {
+        "sample.a.top": ["sample.b.helper"],
+        "sample.b.helper": ["sample.b.inner"],
+        "sample.b.inner": [],
+    }
 
 
-def test_build_and_basic_queries(sample_repo: Path) -> None:
-    idx = CallGraphIndex.build(sample_repo, package="sample")
+def test_from_raw_builds_graphs() -> None:
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
     stats = idx.stats()
-    assert stats["functions"] > 0
-    hits = idx.search("helper")
-    assert any("helper" in h for h in hits)
+    assert stats["functions"] >= 3
+    assert stats["function_edges"] == 2
+    assert stats["modules"] >= 2
 
 
-def test_save_and_load_roundtrip(sample_repo: Path, tmp_path: Path) -> None:
-    idx = CallGraphIndex.build(sample_repo, package="sample")
+def test_queries() -> None:
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    assert "sample.b.helper" in idx.callees_of("sample.a.top", depth=1)
+    assert "sample.b.inner" in idx.callees_of("sample.a.top", depth=2)
+    assert "sample.a.top" in idx.callers_of("sample.b.helper", depth=1)
+    assert idx.search("helper") == ["sample.b.helper"]
+
+
+def test_save_and_load_roundtrip(tmp_path: Path) -> None:
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
     out = tmp_path / "index.json"
     idx.save(out)
-    assert out.exists()
 
     loaded = CallGraphIndex.load(out)
     assert loaded.stats() == idx.stats()
