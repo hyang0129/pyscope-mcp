@@ -81,23 +81,13 @@ def test_compile_stays_exec_or_eval() -> None:
     assert _classify_miss(call) == "exec_or_eval"
 
 
-def test_super_bare_stays_super_unresolved() -> None:
-    """super() as a bare call is ast.Call(func=ast.Name('super')) — classified
-    separately before reaching classify_miss in normal flow, but classify_miss
-    must still return super_unresolved when it receives a node like super()()."""
-    # super() wrapped in another call — the inner super() is the ast.Call.func
-    src = "super()()"
-    tree = ast.parse(src)
-    call_node = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super":
-            call_node = node
-            break
-    assert call_node is not None
-    # classify_miss is called on nodes the visitor failed to resolve; super()
-    # as a bare call (ast.Name 'super') should NOT become builtin_function_call
-    # because 'super' is excluded from BUILTIN_FUNCTION_NAMES.
-    assert "super" not in BUILTIN_FUNCTION_NAMES
+def test_super_bare_stays_bare_name_unresolved() -> None:
+    """super() as a bare Name call is excluded from BUILTIN_FUNCTION_NAMES,
+    so classify_miss falls through to bare_name_unresolved (not builtin_function_call).
+    The visitor resolves super() chains before classify_miss is called; this
+    tests the classifier's own behavior when it receives an unresolved super() node."""
+    call = _parse_call("super()")
+    assert _classify_miss(call) == "bare_name_unresolved"
 
 
 # ---------------------------------------------------------------------------
