@@ -28,6 +28,12 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
     "strip", "lstrip", "rstrip", "replace", "startswith", "endswith",
     "lower", "upper", "title", "capitalize", "casefold", "encode",
     "find", "rfind",
+    # str — additional predicates and transformations
+    "isalnum", "isdigit", "isalpha", "isspace", "isnumeric", "isidentifier",
+    "isdecimal", "isprintable", "istitle", "islower", "isupper",
+    "decode", "from_bytes", "to_bytes",
+    "zfill", "center", "ljust", "rjust", "expandtabs", "swapcase",
+    "partition", "rpartition", "translate", "maketrans",
 })
 
 # Heuristic: method-name-only whitelists for stable external libraries.
@@ -42,10 +48,31 @@ PATHLIB_METHODS: frozenset[str] = frozenset({
     "exists", "mkdir", "read_text", "read_bytes", "write_text", "write_bytes",
     "stat", "relative_to", "glob", "iterdir", "resolve", "unlink",
     "is_file", "is_dir", "parent", "with_suffix", "joinpath",
+    # additional pathlib.Path methods
+    "with_name", "with_stem", "rename", "absolute", "touch", "rmdir", "chmod",
+    "is_absolute", "is_relative_to", "samefile", "expanduser", "home", "cwd",
+    "replace", "symlink_to", "hardlink_to", "readlink", "owner", "group",
+    "lstat", "match",
 })
 
 FUTURES_METHODS: frozenset[str] = frozenset({
     "submit", "map", "result", "shutdown", "cancel", "done", "add_done_callback",
+})
+
+# PIL / Pillow Image and ImageDraw method names.
+PIL_METHODS: frozenset[str] = frozenset({
+    "new", "open", "save", "convert", "resize", "paste", "putalpha", "close",
+    "textbbox", "textsize", "text", "load_default", "truetype",
+    "Draw", "alpha_composite", "crop", "rotate", "transpose", "thumbnail",
+    "getpixel", "putpixel", "fromarray",
+})
+
+# wave module handle method names.
+WAVE_METHODS: frozenset[str] = frozenset({
+    "getnframes", "getnchannels", "getsampwidth", "getframerate",
+    "getcomptype", "getcompname", "readframes",
+    "setnframes", "setnchannels", "setsampwidth", "setframerate",
+    "writeframes", "writeframesraw", "rewind", "tell",
 })
 
 # Pydantic BaseModel base-name heuristic.  A class is treated as a BaseModel
@@ -267,6 +294,26 @@ def classify_miss(
                     return "futures_method_call"
                 if method in PYDANTIC_METHODS:
                     return "pydantic_method_call"
+                if method in PIL_METHODS:
+                    return "pil_method_call"
+                if method in WAVE_METHODS:
+                    return "wave_method_call"
+        else:
+            # chain is None: receiver is a non-Name/non-Attribute expression
+            # (e.g. BinOp, Call, Subscript).  Fall back to method-name lookup.
+            method = func.attr
+            if method in PATHLIB_METHODS:
+                return "pathlib_method_call"
+            if method in PIL_METHODS:
+                return "pil_method_call"
+            if method in WAVE_METHODS:
+                return "wave_method_call"
+            if method in BUILTIN_COLLECTION_METHODS:
+                return "builtin_method_call"
+            if method in FUTURES_METHODS:
+                return "futures_method_call"
+            if method in PYDANTIC_METHODS:
+                return "pydantic_method_call"
         return "attr_chain_unresolved"
 
     return "other_unresolved"

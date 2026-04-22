@@ -249,6 +249,8 @@ class EdgeVisitor(ast.NodeVisitor):
                         "pathlib_method_call",
                         "futures_method_call",
                         "pydantic_method_call",
+                        "pil_method_call",
+                        "wave_method_call",
                     }:
                         self._miss_log.record_accepted(pattern, self._file_path)
                     else:
