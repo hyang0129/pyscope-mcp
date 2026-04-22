@@ -431,7 +431,7 @@ def classify_miss(
             if chain[0] == "self":
                 return "self_method_unresolved"
             # Stdlib alias check: import sys as s; s.exit() or import os; os.path.join()
-            # Resolve chain[0] through import_table and check if it maps to a stdlib module.
+            # None (kwarg omitted) → skip entirely for backward-compat; {} (passed empty) → direct-name fallback still fires.
             if import_table is not None:
                 root_fqn = import_table.get(chain[0])
                 if root_fqn is not None and root_fqn.split(".")[0] in STDLIB_MODULES:

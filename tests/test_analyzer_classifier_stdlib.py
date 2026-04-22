@@ -95,12 +95,14 @@ def test_unknown_root_not_stdlib() -> None:
 
 
 def test_no_import_table_does_not_crash() -> None:
-    """classify_miss without import_table kwarg stays backward-compatible."""
+    """classify_miss without import_table kwarg stays backward-compatible.
+
+    When import_table is None (omitted), the stdlib block is skipped entirely.
+    sys.exit(1) then falls through all method-name whitelists ('exit' matches
+    none of them) and lands on attr_chain_unresolved.
+    """
     call = _parse_call("sys.exit(1)")
-    # Without import_table, the stdlib check is skipped entirely
     result = _classify_miss(call)
-    # sys.exit — 'exit' is in neither builtin method sets; falls through to attr_chain_unresolved
-    # unless logger/random/requests chain-root guards fire — they don't for 'sys'
     assert result == "attr_chain_unresolved"
 
 
