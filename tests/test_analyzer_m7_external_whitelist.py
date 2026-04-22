@@ -103,6 +103,16 @@ def test_futures_add_done_callback_accepted() -> None:
     assert _classify_miss(call) == "futures_method_call"
 
 
+def test_futures_submit_accepted() -> None:
+    call = _parse_call("executor.submit(fn, 1)")
+    assert _classify_miss(call) == "futures_method_call"
+
+
+def test_futures_map_accepted() -> None:
+    call = _parse_call("executor.map(fn, items)")
+    assert _classify_miss(call) == "futures_method_call"
+
+
 # ---------------------------------------------------------------------------
 # Classifier unit tests — pydantic BaseModel
 # ---------------------------------------------------------------------------
@@ -166,6 +176,59 @@ def test_futures_method_in_accepted_counts(tmp_path: Path) -> None:
     assert summary["accepted_counts"].get("futures_method_call", 0) >= 1
     patterns = {e["pattern"] for e in report["unresolved_calls"]}
     assert "futures_method_call" not in patterns
+
+
+def test_pydantic_super_init_routed_to_accepted(tmp_path: Path) -> None:
+    """super().__init__(**data) on a BaseModel subclass is accepted, not super_unresolved."""
+    root = _make_package(tmp_path, "pkg", {
+        "mod.py": (
+            "from pydantic import BaseModel\n"
+            "\n"
+            "class Config(BaseModel):\n"
+            "    name: str\n"
+            "\n"
+            "    def __init__(self, **data):\n"
+            "        super().__init__(**data)\n"
+        ),
+    })
+    _raw, report = build_with_report(root, "pkg")
+    summary = report["summary"]
+    assert summary["accepted_counts"].get("pydantic_method_call", 0) >= 1
+    # super_unresolved for the BaseModel subclass init should not be recorded.
+    patterns = {e["pattern"] for e in report["unresolved_calls"]}
+    assert "super_unresolved" not in patterns
+
+
+def test_pydantic_super_init_transitive_base(tmp_path: Path) -> None:
+    """super().__init__() routed to accepted when BaseModel is a grandparent."""
+    root = _make_package(tmp_path, "pkg", {
+        "mod.py": (
+            "from pydantic import BaseModel\n"
+            "\n"
+            "class Parent(BaseModel):\n"
+            "    pass\n"
+            "\n"
+            "class Child(Parent):\n"
+            "    def __init__(self, **data):\n"
+            "        super().__init__(**data)\n"
+        ),
+    })
+    _raw, report = build_with_report(root, "pkg")
+    summary = report["summary"]
+    assert summary["accepted_counts"].get("pydantic_method_call", 0) >= 1
+
+
+def test_non_pydantic_super_init_stays_super_unresolved(tmp_path: Path) -> None:
+    """False-positive guard: class with no BaseModel ancestor stays super_unresolved."""
+    root = _make_package(tmp_path, "pkg", {
+        "mod.py": (
+            "class Thing:\n"
+            "    def __init__(self):\n"
+            "        super().__init__()\n"
+        ),
+    })
+    _raw, report = build_with_report(root, "pkg")
+    assert report["summary"]["accepted_counts"].get("pydantic_method_call", 0) == 0
 
 
 def test_pydantic_method_in_accepted_counts(tmp_path: Path) -> None:

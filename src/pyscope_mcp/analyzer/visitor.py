@@ -222,7 +222,11 @@ class EdgeVisitor(ast.NodeVisitor):
                 if ext is not None:
                     self._miss_log.record_resolved(in_package=False)
                 else:
-                    pattern = classify_miss(node)
+                    pattern = classify_miss(
+                        node,
+                        enclosing_class_fqn=self._enclosing_class_fqn(),
+                        class_bases=self._ctx.class_bases,
+                    )
                     if pattern in {
                         "builtin_method_call",
                         "pathlib_method_call",
