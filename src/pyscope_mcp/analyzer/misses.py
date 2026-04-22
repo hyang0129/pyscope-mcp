@@ -117,6 +117,69 @@ PYDANTIC_BASE_NAMES: frozenset[str] = frozenset({"BaseModel", "RootModel"})
 PYDANTIC_METHODS: frozenset[str] = frozenset({
     "model_dump", "model_dump_json", "model_validate", "model_validate_json",
     "model_copy", "model_fields",
+    "model_rebuild", "model_json_schema", "model_parametrized_name",
+})
+
+# File-like object method names.  Gated conservatively: only classified as
+# io_method_call when chain[0] is a known file-var name OR when chain is None
+# (receiver is a Call result like open(p).read()).
+IO_METHODS: frozenset[str] = frozenset({
+    "read", "write", "readline", "readlines", "writelines", "seek", "tell",
+    "flush", "close", "truncate", "readable", "writable", "seekable",
+    "getvalue", "getbuffer",
+})
+
+# hashlib hash-object method names.  These are distinctive enough to classify
+# without any chain-root guard.
+HASHLIB_METHODS: frozenset[str] = frozenset({
+    "hexdigest", "digest", "update", "copy",
+})
+
+# random / Random instance method names.
+RANDOM_METHODS: frozenset[str] = frozenset({
+    "random", "randint", "choice", "choices", "sample", "shuffle", "uniform",
+    "seed", "randrange", "getrandbits", "gauss",
+})
+
+# argparse ArgumentParser / subparsers method names.  Distinctive enough to
+# classify without chain-root guard.
+ARGPARSE_METHODS: frozenset[str] = frozenset({
+    "add_argument", "add_subparsers", "add_parser", "parse_args",
+    "parse_known_args", "set_defaults", "add_argument_group",
+    "add_mutually_exclusive_group", "print_help",
+})
+
+# Anthropic SDK client method names.  Generic names (create/list/retrieve)
+# are only classified as anthropic when the chain contains a known client-var
+# or an intermediate Anthropic namespace attr (messages/beta/completions).
+ANTHROPIC_METHODS: frozenset[str] = frozenset({
+    "create", "stream", "count_tokens", "retrieve", "list",
+})
+
+# Known Anthropic client variable names that make ANTHROPIC_METHODS unambiguous.
+_ANTHROPIC_CLIENT_VARS: frozenset[str] = frozenset({
+    "client", "anthropic_client", "_client",
+})
+
+# Intermediate attribute names that indicate an Anthropic SDK chain.
+_ANTHROPIC_ATTRS: frozenset[str] = frozenset({
+    "messages", "beta", "completions",
+})
+
+# requests Response method names — gated on chain-root variable name to avoid
+# false positives on in-package .json() style methods.
+REQUESTS_METHODS: frozenset[str] = frozenset({
+    "json", "raise_for_status", "iter_content", "iter_lines",
+})
+
+# Known requests response variable names.
+_REQUESTS_RESP_VARS: frozenset[str] = frozenset({
+    "r", "resp", "response",
+})
+
+# Known IO file variable names — used to gate io_method_call conservatively.
+_IO_FILE_VARS: frozenset[str] = frozenset({
+    "f", "fh", "fp", "file", "tmp", "buf", "stream",
 })
 
 # Pattern tags from classify_miss that route to record_accepted (vs record_miss).
@@ -125,6 +188,9 @@ ACCEPTED_PATTERNS: frozenset[str] = frozenset({
     "pydantic_method_call", "pil_method_call", "wave_method_call",
     "loguru_method_call", "re_method_call", "datetime_method_call",
     "difflib_method_call",
+    # M8 additions
+    "io_method_call", "hashlib_method_call", "random_method_call",
+    "argparse_method_call", "anthropic_method_call", "requests_method_call",
 })
 
 
@@ -258,6 +324,12 @@ def _has_pydantic_ancestor(
     return False
 
 
+def _chain_has_anthropic_attr(chain: list[str]) -> bool:
+    """Return True if any intermediate element of chain is an Anthropic namespace attr."""
+    # chain[-1] is the method, chain[0] is the root — check the middle attrs
+    return bool(set(chain[1:-1]) & _ANTHROPIC_ATTRS)
+
+
 def classify_miss(
     node: ast.Call,
     *,
@@ -330,6 +402,13 @@ def classify_miss(
                 # Chain-root special case: known logger variable names
                 if chain[0] in {"logger", "log", "logging"}:
                     return "loguru_method_call"
+                # Chain-root special case: random / rng
+                if chain[0] in {"random", "rng"}:
+                    return "random_method_call"
+                # Chain-root special case: requests response variables
+                # Only route when both chain-root AND method match.
+                if chain[0] in _REQUESTS_RESP_VARS and method in REQUESTS_METHODS:
+                    return "requests_method_call"
                 if method in BUILTIN_COLLECTION_METHODS:
                     return "builtin_method_call"
                 if method in PATHLIB_METHODS:
@@ -350,6 +429,20 @@ def classify_miss(
                     return "datetime_method_call"
                 if method in DIFFLIB_METHODS:
                     return "difflib_method_call"
+                if method in HASHLIB_METHODS:
+                    return "hashlib_method_call"
+                if method in RANDOM_METHODS:
+                    return "random_method_call"
+                if method in ARGPARSE_METHODS:
+                    return "argparse_method_call"
+                # Anthropic: gate strictly — only when chain-root is a known
+                # client var OR an intermediate attr is an Anthropic namespace.
+                if method in ANTHROPIC_METHODS:
+                    if chain[0] in _ANTHROPIC_CLIENT_VARS or _chain_has_anthropic_attr(chain):
+                        return "anthropic_method_call"
+                # IO: gate conservatively on chain[0] being a known file-var name.
+                if method in IO_METHODS and chain[0] in _IO_FILE_VARS:
+                    return "io_method_call"
         else:
             # chain is None: receiver is a non-Name/non-Attribute expression
             # (e.g. BinOp, Call, Subscript).  Fall back to method-name lookup.
@@ -374,6 +467,18 @@ def classify_miss(
                 return "datetime_method_call"
             if method in DIFFLIB_METHODS:
                 return "difflib_method_call"
+            if method in HASHLIB_METHODS:
+                return "hashlib_method_call"
+            if method in RANDOM_METHODS:
+                return "random_method_call"
+            if method in ARGPARSE_METHODS:
+                return "argparse_method_call"
+            # IO chain-None: receiver is a call result like open(p).read() —
+            # safe to classify without chain-root guard.
+            if method in IO_METHODS:
+                return "io_method_call"
+            # NOTE: anthropic and requests are NOT classified in chain-None
+            # fallback — their method names are too generic without chain context.
         return "attr_chain_unresolved"
 
     return "other_unresolved"
