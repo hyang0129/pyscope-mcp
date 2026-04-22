@@ -11,7 +11,6 @@ from .resolution import (
     dispatcher_callable_arg,
     infer_call_class_type,
     is_dispatcher_call,
-    resolve_call_result_method,
     resolve_local_var_method,
     resolve_self_attr_method,
     walk_mro,

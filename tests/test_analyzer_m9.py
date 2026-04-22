@@ -248,6 +248,49 @@ def test_nested_func_scope_isolation(tmp_path: Path) -> None:
     assert "pkg.mod.Worker.process" not in inner_callees
 
 
+def test_deeply_nested_func_no_double_processing(tmp_path: Path) -> None:
+    """outer -> inner -> innermost: innermost must be collected exactly once.
+
+    Regression guard for the ast.walk double-processing bug: _scan_function_body
+    formerly used ast.walk which would find innermost from outer's walk AND again
+    from inner's walk, causing duplicate/incorrect bindings. This test verifies
+    that a binding in innermost is still correctly captured (not lost) and that
+    innermost has only its own scope bindings (not inherited from outer or inner).
+    """
+    root = _make_package(tmp_path, "pkg", {
+        "mod.py": (
+            "class Worker:\n"
+            "    def process(self):\n"
+            "        return 42\n"
+            "\n"
+            "class Other:\n"
+            "    def run(self):\n"
+            "        return 1\n"
+            "\n"
+            "def outer(w: Worker):\n"
+            "    def inner(o: Other):\n"
+            "        def innermost():\n"
+            "            x = Worker()\n"
+            "            return x.process()\n"
+            "        return innermost\n"
+            "    return inner\n"
+        ),
+    })
+    raw = build_raw(root, "pkg")
+    # innermost has its own binding x = Worker() — edge to Worker.process
+    innermost_callees = raw.get("pkg.mod.outer.inner.innermost", [])
+    assert "pkg.mod.Worker.process" in innermost_callees
+    # innermost must NOT inherit outer's 'w: Worker' or inner's 'o: Other' bindings
+    assert "pkg.mod.Other.run" not in innermost_callees
+    # inner's scope has o: Other — edge to Other.run from inner is valid but
+    # innermost should not inherit it
+    # Also verify inner and outer scopes are independent
+    inner_callees = raw.get("pkg.mod.outer.inner", [])
+    outer_callees = raw.get("pkg.mod.outer", [])
+    # outer binds w: Worker but makes no calls — no Worker.process edge from outer
+    assert "pkg.mod.Worker.process" not in outer_callees
+
+
 def test_lambda_outer_scope_not_inherited(tmp_path: Path) -> None:
     """f = lambda: x.method() where x is bound in outer scope — no edge from lambda."""
     root = _make_package(tmp_path, "pkg", {

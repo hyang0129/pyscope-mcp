@@ -385,6 +385,34 @@ def _collect_func_local_types(
             _scan_function_body(child, module_fqn, child_fqn, import_table, known_classes, result)
 
 
+def _iter_direct_nested_funcs(
+    stmts: list[ast.stmt],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Yield FunctionDef/AsyncFunctionDef nodes that are directly (shallowly) nested.
+
+    Descends into if/for/while/with/try bodies (where a def can appear) but
+    does NOT descend into nested function bodies — those are separate scopes.
+    """
+    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append(stmt)
+        elif isinstance(stmt, ast.If):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, ast.For):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, ast.While):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            found.extend(_iter_direct_nested_funcs(stmt.body))
+        elif isinstance(stmt, ast.Try):
+            all_stmts = stmt.body + stmt.orelse + stmt.finalbody
+            for handler in stmt.handlers:
+                all_stmts += handler.body
+            found.extend(_iter_direct_nested_funcs(all_stmts))
+    return found
+
+
 def _scan_function_body(
     func_node: ast.FunctionDef | ast.AsyncFunctionDef,
     module_fqn: str,
@@ -422,13 +450,14 @@ def _scan_function_body(
     if var_types:
         result[func_fqn] = var_types
 
-    # Recurse into nested functions as separate scopes.
-    for stmt in ast.walk(func_node):
-        if stmt is func_node:
-            continue
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            nested_fqn = f"{func_fqn}.{stmt.name}"
-            _scan_function_body(stmt, module_fqn, nested_fqn, import_table, known_classes, result)
+    # Recurse into directly-nested functions as separate scopes.
+    # We must NOT use ast.walk here — it descends transitively and would visit
+    # doubly-nested functions twice (once from this scope's walk, and again
+    # when the intermediate scope's _scan_function_body runs its own walk).
+    # Instead collect only direct-child function defs from the body stmts.
+    for nested in _iter_direct_nested_funcs(func_node.body):
+        nested_fqn = f"{func_fqn}.{nested.name}"
+        _scan_function_body(nested, module_fqn, nested_fqn, import_table, known_classes, result)
 
 
 def _walk_body_for_bindings(
