@@ -82,6 +82,154 @@ def collect_class_bases(
     return result
 
 
+def collect_self_attr_types(
+    tree: ast.Module,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_fqns: set[str],
+) -> dict[str, dict[str, str]]:
+    """Map ``{class_fqn: {attr_name: inferred_class_fqn}}`` for top-level classes.
+
+    For each class, inspect ``__init__`` (and ``__post_init__``) for assignments
+    of the form ``self.X = Y`` where ``Y``'s type is statically resolvable:
+
+    1. RHS is a direct constructor call: ``self.X = Foo(...)`` → ``Foo`` via
+       existing import/alias machinery.
+    2. RHS is a bare name that matches an annotated ``__init__`` parameter:
+       ``def __init__(self, foo: Foo)`` + ``self.X = foo`` → ``Foo``.
+
+    First-assignment-wins; no flow-sensitive reassignment tracking.
+    No tuple/dict unpacking, no factory-function return-type resolution.
+    Returns only attrs whose inferred type is in ``known_fqns``.
+    """
+    result: dict[str, dict[str, str]] = {}
+
+    for node in ast.iter_child_nodes(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        class_fqn = f"{module_fqn}.{node.name}"
+
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if child.name not in {"__init__", "__post_init__"}:
+                continue
+
+            # Build param-name → annotated-type FQN map from the signature.
+            param_types: dict[str, str] = {}
+            for arg in child.args.args:
+                if arg.arg == "self":
+                    continue
+                if arg.annotation is not None:
+                    resolved = _resolve_annotation(
+                        arg.annotation, module_fqn, import_table, known_fqns
+                    )
+                    if resolved is not None:
+                        param_types[arg.arg] = resolved
+
+            # Walk the body for ``self.X = ...`` assignments.
+            attr_types: dict[str, str] = result.setdefault(class_fqn, {})
+            for stmt in ast.walk(child):
+                if not isinstance(stmt, ast.Assign):
+                    continue
+                if len(stmt.targets) != 1:
+                    continue
+                target = stmt.targets[0]
+                if not (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    continue
+                attr_name = target.attr
+                if attr_name in attr_types:
+                    continue  # first-assignment-wins
+
+                inferred = _infer_type(
+                    stmt.value, module_fqn, import_table, known_fqns, param_types
+                )
+                if inferred is not None:
+                    attr_types[attr_name] = inferred
+
+    return result
+
+
+def _resolve_annotation(
+    annotation: ast.expr,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_fqns: set[str],
+) -> str | None:
+    """Resolve a type annotation expression to an in-package FQN, or None."""
+    if isinstance(annotation, ast.Name):
+        name = annotation.id
+        if name in import_table:
+            candidate = import_table[name]
+            if candidate in known_fqns:
+                return candidate
+        candidate = f"{module_fqn}.{name}"
+        if candidate in known_fqns:
+            return candidate
+        return None
+
+    chain = attr_chain(annotation)
+    if chain is None:
+        return None
+    for prefix_len in range(len(chain) - 1, 0, -1):
+        prefix = ".".join(chain[:prefix_len])
+        if prefix in import_table:
+            base_fqn = import_table[prefix]
+            remainder = chain[prefix_len:]
+            candidate = ".".join([base_fqn] + remainder)
+            if candidate in known_fqns:
+                return candidate
+    dotted = ".".join(chain)
+    if dotted in known_fqns:
+        return dotted
+    return None
+
+
+def _infer_type(
+    rhs: ast.expr,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_fqns: set[str],
+    param_types: dict[str, str],
+) -> str | None:
+    """Infer the class type of an RHS expression (best-effort, v1 scope only)."""
+    # Case 1: bare name → parameter annotation.
+    if isinstance(rhs, ast.Name):
+        return param_types.get(rhs.id)
+
+    # Case 2: constructor call: Foo(...) or pkg.Foo(...) or aliased.Foo(...)
+    if isinstance(rhs, ast.Call):
+        func = rhs.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in import_table:
+                candidate = import_table[name]
+                if candidate in known_fqns:
+                    return candidate
+            candidate = f"{module_fqn}.{name}"
+            if candidate in known_fqns:
+                return candidate
+            return None
+        chain = attr_chain(func)
+        if chain is not None:
+            for prefix_len in range(len(chain) - 1, 0, -1):
+                prefix = ".".join(chain[:prefix_len])
+                if prefix in import_table:
+                    base_fqn = import_table[prefix]
+                    remainder = chain[prefix_len:]
+                    candidate = ".".join([base_fqn] + remainder)
+                    if candidate in known_fqns:
+                        return candidate
+            dotted = ".".join(chain)
+            if dotted in known_fqns:
+                return dotted
+    return None
+
+
 def _resolve_base(
     base: ast.expr,
     module_fqn: str,
