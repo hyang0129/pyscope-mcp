@@ -223,7 +223,12 @@ class EdgeVisitor(ast.NodeVisitor):
                     self._miss_log.record_resolved(in_package=False)
                 else:
                     pattern = classify_miss(node)
-                    if pattern == "builtin_method_call":
+                    if pattern in {
+                        "builtin_method_call",
+                        "pathlib_method_call",
+                        "futures_method_call",
+                        "pydantic_method_call",
+                    }:
                         self._miss_log.record_accepted(pattern, self._file_path)
                     else:
                         self._miss_log.record_miss(

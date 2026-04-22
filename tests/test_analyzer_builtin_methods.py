@@ -49,10 +49,10 @@ def test_str_format_is_accepted() -> None:
     assert _classify_miss(call) == "builtin_method_call"
 
 
-def test_pathlib_write_text_stays_attr_chain() -> None:
-    """write_text is not in the whitelist — must stay attr_chain_unresolved."""
+def test_pathlib_write_text_accepted() -> None:
+    """write_text is in the pathlib whitelist — accepted as pathlib_method_call."""
     call = _parse_call("path.write_text('hello')")
-    assert _classify_miss(call) == "attr_chain_unresolved"
+    assert _classify_miss(call) == "pathlib_method_call"
 
 
 def test_get_value_method_stays_attr_chain() -> None:

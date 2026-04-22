@@ -30,6 +30,29 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
     "find", "rfind",
 })
 
+# Heuristic: method-name-only whitelists for stable external libraries.
+# We cannot infer receiver types statically, so we accept any attribute call
+# whose method name appears in these sets.  This is a noise-reduction measure
+# (moves calls from unresolved_calls to accepted_counts) — it does NOT produce
+# resolved edges.  False-positive rate is low for these names in practice, but
+# any in-package class that defines the same method will be resolved earlier by
+# the self/MRO path and never reach classify_miss.
+
+PATHLIB_METHODS: frozenset[str] = frozenset({
+    "exists", "mkdir", "read_text", "read_bytes", "write_text", "write_bytes",
+    "stat", "relative_to", "glob", "iterdir", "resolve", "unlink",
+    "is_file", "is_dir", "parent", "with_suffix", "joinpath",
+})
+
+FUTURES_METHODS: frozenset[str] = frozenset({
+    "result", "shutdown", "cancel", "done", "add_done_callback",
+})
+
+PYDANTIC_METHODS: frozenset[str] = frozenset({
+    "model_dump", "model_dump_json", "model_validate", "model_validate_json",
+    "model_copy", "model_fields",
+})
+
 
 class MissLog:
     """Accumulates miss/skip/resolution data during pass 2."""
@@ -180,8 +203,16 @@ def classify_miss(node: ast.Call) -> str:
                 return "importlib_import_module"
             if chain[0] == "self":
                 return "self_method_unresolved"
-            if chain[0] != "self" and chain[-1] in BUILTIN_COLLECTION_METHODS:
-                return "builtin_method_call"
+            method = chain[-1]
+            if chain[0] != "self":
+                if method in BUILTIN_COLLECTION_METHODS:
+                    return "builtin_method_call"
+                if method in PATHLIB_METHODS:
+                    return "pathlib_method_call"
+                if method in FUTURES_METHODS:
+                    return "futures_method_call"
+                if method in PYDANTIC_METHODS:
+                    return "pydantic_method_call"
         return "attr_chain_unresolved"
 
     return "other_unresolved"
