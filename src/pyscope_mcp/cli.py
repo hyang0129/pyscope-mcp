@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,6 +15,41 @@ def _index_path(value: str | None) -> Path:
     return Path(value or os.environ.get("PYSCOPE_MCP_INDEX") or DEFAULT_INDEX_PATH).resolve()
 
 
+def _print_summary(report: dict, misses_path: Path) -> None:
+    """Print a one-screen build summary to stderr."""
+    s = report["summary"]
+    files_total = s["files_total"]
+    files_parsed = s["files_parsed"]
+    files_skipped = s["files_skipped"]
+    calls_total = s["calls_total"]
+    calls_in_pkg = s["calls_resolved_in_package"]
+    calls_ext = s["calls_resolved_external"]
+    calls_unres = s["calls_unresolved"]
+
+    in_pkg_pct = round(calls_in_pkg / calls_total * 100) if calls_total > 0 else 0
+    unres_pct = round(calls_unres / calls_total * 100) if calls_total > 0 else 0
+
+    skip_note = f"  ({files_skipped} skipped — see misses.json)" if files_skipped else ""
+
+    lines = [
+        "pyscope-mcp build complete",
+        f"  files:  {files_parsed}/{files_total} parsed{skip_note}",
+        f"  calls:  {calls_total} total → {calls_in_pkg} in-package edges ({in_pkg_pct}%)",
+        f"          {calls_ext} external (dropped), {calls_unres} unresolved ({unres_pct}%)",
+    ]
+
+    pattern_counts: dict[str, int] = report.get("pattern_counts", {})
+    if pattern_counts:
+        top5 = sorted(pattern_counts.items(), key=lambda kv: -kv[1])[:5]
+        lines.append("  top unresolved patterns:")
+        for pattern, count in top5:
+            lines.append(f"    {pattern:<30} {count}")
+
+    lines.append(f"  full report: {misses_path}")
+
+    print("\n".join(lines), file=sys.stderr)
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     root = Path(args.root or os.environ.get("PYSCOPE_MCP_ROOT") or os.getcwd()).resolve()
     package = args.package or os.environ.get("PYSCOPE_MCP_PACKAGE")
@@ -22,11 +58,16 @@ def cmd_build(args: argparse.Namespace) -> int:
         out = (root / out).resolve()
 
     print(f"[pyscope-mcp] building index: root={root} package={package or root.name}", file=sys.stderr)
-    from pyscope_mcp.analyzer import build_raw
+    from pyscope_mcp.analyzer import build_with_report
 
-    raw = build_raw(root, package=package or root.name)
+    raw, miss_report = build_with_report(root, package=package or root.name)
     idx = CallGraphIndex.from_raw(root, raw)
     idx.save(out)
+
+    # Write misses sidecar next to index.json
+    misses_path = out.parent / "misses.json"
+    misses_path.write_text(json.dumps(miss_report, indent=2))
+
     stats = idx.stats()
     print(
         f"[pyscope-mcp] wrote {out} "
@@ -34,6 +75,8 @@ def cmd_build(args: argparse.Namespace) -> int:
         f"{stats['modules']} modules)",
         file=sys.stderr,
     )
+
+    _print_summary(miss_report, misses_path)
     return 0
 
 
