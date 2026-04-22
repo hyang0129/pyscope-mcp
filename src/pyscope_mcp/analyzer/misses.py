@@ -258,7 +258,14 @@ class MissLog:
         """Assemble the full misses.json structure."""
         total = self.calls_total
         in_pkg = self.calls_resolved_in_package
+        ext = self.calls_resolved_external
+        unres = self.calls_unresolved
         rate = round(in_pkg / total, 4) if total > 0 else 0.0
+        unresolved_rate = round(unres / total, 4) if total > 0 else 0.0
+        effective_denom = in_pkg + ext + unres
+        effective_resolution = (
+            round((in_pkg + ext) / effective_denom, 4) if effective_denom > 0 else 0.0
+        )
 
         flat_unresolved: list[dict] = []
         for pattern in sorted(self.unresolved_calls):
@@ -285,6 +292,8 @@ class MissLog:
                 "calls_accepted": self.calls_accepted,
                 "accepted_counts": dict(self.accepted_counts),
                 "resolution_rate_in_package": rate,
+                "unresolved_rate": unresolved_rate,
+                "effective_resolution": effective_resolution,
                 "rollups": {
                     "dead_keys": dead_keys,
                     "unreferenced_modules": unreferenced_modules,
