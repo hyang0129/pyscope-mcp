@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import ast
 
-from .misses import ACCEPTED_PATTERNS, MissLog, classify_miss, snippet
+from .discovery import SENTINEL_BUILTIN_TYPES
+from .misses import (
+    ACCEPTED_PATTERNS,
+    BUILTIN_COLLECTION_METHODS,
+    PATHLIB_METHODS,
+    MissLog,
+    classify_miss,
+    snippet,
+)
 from .resolution import (
     ResolveCtx,
     attr_chain,
@@ -15,6 +23,15 @@ from .resolution import (
     resolve_self_attr_method,
     walk_mro,
 )
+
+# Map sentinel FQN → accepted pattern tag + valid method set.
+_SENTINEL_ACCEPTED: dict[str, tuple[str, frozenset[str]]] = {
+    "builtins.dict": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
+    "builtins.list": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
+    "builtins.set": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
+    "builtins.tuple": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
+    "pathlib.Path": ("pathlib_method_call", PATHLIB_METHODS),
+}
 
 
 class EdgeVisitor(ast.NodeVisitor):
@@ -247,6 +264,54 @@ class EdgeVisitor(ast.NodeVisitor):
         caller = self._current_caller()
         self.edges.setdefault(caller, set()).add(callee_fqn)
 
+    def _try_accept_self_attr_sentinel(self, node: ast.Call) -> str | None:
+        """For ``self.<attr>.<method>(...)`` calls where ``<attr>`` is typed as a
+        sentinel (builtin or pathlib.Path), return the accepted-pattern tag if the
+        method is in the corresponding whitelist; otherwise return None.
+
+        Called before classify_miss so these don't land in self_method_unresolved.
+        """
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return None
+        chain = attr_chain(func)
+        if chain is None or len(chain) != 3 or chain[0] != "self":
+            return None
+        attr_name, method = chain[1], chain[2]
+        class_fqn = self._enclosing_class_fqn()
+        if class_fqn is None:
+            return None
+        attr_class = self._ctx.self_attr_types.get(class_fqn, {}).get(attr_name)
+        if attr_class is None or attr_class not in _SENTINEL_ACCEPTED:
+            return None
+        accepted_tag, valid_methods = _SENTINEL_ACCEPTED[attr_class]
+        if method in valid_methods:
+            return accepted_tag
+        return None
+
+    def _try_accept_local_var_sentinel(self, node: ast.Call) -> str | None:
+        """For ``var.<method>(...)`` calls where ``var`` is a local variable typed
+        as a sentinel (builtin or pathlib.Path), return the accepted-pattern tag if
+        the method is in the corresponding whitelist; otherwise return None.
+        """
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return None
+        chain = attr_chain(func)
+        if chain is None or len(chain) != 2 or chain[0] == "self":
+            return None
+        var_name, method = chain[0], chain[1]
+        func_fqn = self._current_func_fqn()
+        if func_fqn is None:
+            return None
+        var_class = self._ctx.local_types.get(func_fqn, {}).get(var_name)
+        if var_class is None or var_class not in _SENTINEL_ACCEPTED:
+            return None
+        accepted_tag, valid_methods = _SENTINEL_ACCEPTED[var_class]
+        if method in valid_methods:
+            return accepted_tag
+        return None
+
     def _try_emit_dispatcher_edge(self, call: ast.Call) -> bool:
         """If `call` looks like `dispatcher(fn, ...)` where fn is an in-package
         callable reference, emit an extra edge to fn. Returns True iff we emitted.
@@ -295,22 +360,32 @@ class EdgeVisitor(ast.NodeVisitor):
                 if ext is not None:
                     self._miss_log.record_resolved(in_package=False)
                 else:
-                    pattern = classify_miss(
-                        node,
-                        enclosing_class_fqn=self._enclosing_class_fqn(),
-                        class_bases=self._ctx.class_bases,
-                        import_table=self._ctx.import_table,
+                    # Check if this is a self-attr or local-var sentinel call before
+                    # falling through to classify_miss (which would tag it as
+                    # self_method_unresolved / attr_chain_unresolved).
+                    sentinel_tag = (
+                        self._try_accept_self_attr_sentinel(node)
+                        or self._try_accept_local_var_sentinel(node)
                     )
-                    if pattern in ACCEPTED_PATTERNS:
-                        self._miss_log.record_accepted(pattern, self._file_path)
+                    if sentinel_tag is not None:
+                        self._miss_log.record_accepted(sentinel_tag, self._file_path)
                     else:
-                        self._miss_log.record_miss(
-                            pattern=pattern,
-                            caller=self._current_caller(),
-                            file_path=self._file_path,
-                            line=node.lineno,
-                            snippet=snippet(node),
+                        pattern = classify_miss(
+                            node,
+                            enclosing_class_fqn=self._enclosing_class_fqn(),
+                            class_bases=self._ctx.class_bases,
+                            import_table=self._ctx.import_table,
                         )
+                        if pattern in ACCEPTED_PATTERNS:
+                            self._miss_log.record_accepted(pattern, self._file_path)
+                        else:
+                            self._miss_log.record_miss(
+                                pattern=pattern,
+                                caller=self._current_caller(),
+                                file_path=self._file_path,
+                                line=node.lineno,
+                                snippet=snippet(node),
+                            )
 
         # Indirect-dispatch extra edge: if the dispatcher's callable arg is an
         # in-package reference, emit an edge to it. Runs regardless of whether
