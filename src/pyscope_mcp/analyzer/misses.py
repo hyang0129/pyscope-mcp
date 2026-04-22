@@ -190,9 +190,20 @@ _IO_FILE_VARS: frozenset[str] = frozenset({
     "f", "fh", "fp", "file", "tmp", "buf", "stream",
 })
 
+# Curated list of stdlib top-level module names.  Pinned rather than
+# enumerated at runtime (sys.stdlib_module_names) for determinism.
+STDLIB_MODULES: frozenset[str] = frozenset({
+    "sys", "os", "json", "re", "pathlib", "functools", "itertools",
+    "collections", "typing", "dataclasses", "math", "time", "datetime",
+    "shutil", "subprocess", "logging", "tempfile", "uuid", "hashlib",
+    "base64", "enum", "asyncio", "contextlib", "inspect", "warnings",
+    "copy", "traceback", "threading", "queue", "pickle", "csv", "io",
+})
+
 # Pattern tags from classify_miss that route to record_accepted (vs record_miss).
 ACCEPTED_PATTERNS: frozenset[str] = frozenset({
     "builtin_function_call",
+    "stdlib_method_call",
     "builtin_method_call", "pathlib_method_call", "futures_method_call",
     "pydantic_method_call", "pil_method_call", "wave_method_call",
     "loguru_method_call", "re_method_call", "datetime_method_call",
@@ -353,12 +364,14 @@ def classify_miss(
     *,
     enclosing_class_fqn: str | None = None,
     class_bases: dict[str, list[str]] | None = None,
+    import_table: dict[str, str] | None = None,
 ) -> str:
     """Classify why a call could not be resolved. Returns a pattern tag.
 
     The optional kwargs let the classifier recognise `super().method(...)`
     on pydantic BaseModel subclasses and route them to pydantic_method_call
-    instead of super_unresolved.
+    instead of super_unresolved, and aliased stdlib calls (e.g.
+    `import sys as s; s.exit()`) to stdlib_method_call.
     """
     func = node.func
 
@@ -417,6 +430,15 @@ def classify_miss(
                 return "importlib_import_module"
             if chain[0] == "self":
                 return "self_method_unresolved"
+            # Stdlib alias check: import sys as s; s.exit() or import os; os.path.join()
+            # None (kwarg omitted) → skip entirely for backward-compat; {} (passed empty) → direct-name fallback still fires.
+            if import_table is not None:
+                root_fqn = import_table.get(chain[0])
+                if root_fqn is not None and root_fqn.split(".")[0] in STDLIB_MODULES:
+                    return "stdlib_method_call"
+                # Also handle direct module names: `import sys` → chain[0]=='sys' in STDLIB_MODULES
+                if chain[0] in STDLIB_MODULES and chain[0] not in import_table:
+                    return "stdlib_method_call"
             method = chain[-1]
             if chain[0] != "self":
                 # Chain-root special case: known logger variable names
