@@ -30,6 +30,35 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
     "find", "rfind",
 })
 
+# Heuristic: method-name-only whitelists for stable external libraries.
+# We cannot infer receiver types statically, so we accept any attribute call
+# whose method name appears in these sets.  This is a noise-reduction measure
+# (moves calls from unresolved_calls to accepted_counts) — it does NOT produce
+# resolved edges.  False-positive rate is low for these names in practice, but
+# any in-package class that defines the same method will be resolved earlier by
+# the self/MRO path and never reach classify_miss.
+
+PATHLIB_METHODS: frozenset[str] = frozenset({
+    "exists", "mkdir", "read_text", "read_bytes", "write_text", "write_bytes",
+    "stat", "relative_to", "glob", "iterdir", "resolve", "unlink",
+    "is_file", "is_dir", "parent", "with_suffix", "joinpath",
+})
+
+FUTURES_METHODS: frozenset[str] = frozenset({
+    "submit", "map", "result", "shutdown", "cancel", "done", "add_done_callback",
+})
+
+# Pydantic BaseModel base-name heuristic.  A class is treated as a BaseModel
+# subclass if any (transitive) base's *short name* matches one of these.  We
+# use short names because the full FQN of the external base is not known
+# without runtime import resolution.
+PYDANTIC_BASE_NAMES: frozenset[str] = frozenset({"BaseModel", "RootModel"})
+
+PYDANTIC_METHODS: frozenset[str] = frozenset({
+    "model_dump", "model_dump_json", "model_validate", "model_validate_json",
+    "model_copy", "model_fields",
+})
+
 
 class MissLog:
     """Accumulates miss/skip/resolution data during pass 2."""
@@ -137,8 +166,42 @@ class MissLog:
         }
 
 
-def classify_miss(node: ast.Call) -> str:
-    """Classify why a call could not be resolved. Returns a pattern tag."""
+def _has_pydantic_ancestor(
+    class_fqn: str,
+    class_bases: dict[str, list[str]],
+    _seen: frozenset[str] = frozenset(),
+) -> bool:
+    """Shallow heuristic: True if `class_fqn` has any base whose short name is
+    in PYDANTIC_BASE_NAMES, walking in-package ancestors transitively.
+
+    External bases (not tracked in class_bases) are checked by short name
+    only — so `class Foo(BaseModel)` matches even though `BaseModel` is not
+    in class_bases.
+    """
+    if class_fqn in _seen:
+        return False
+    seen = _seen | {class_fqn}
+    for base in class_bases.get(class_fqn, []):
+        short = base.rsplit(".", 1)[-1]
+        if short in PYDANTIC_BASE_NAMES:
+            return True
+        if _has_pydantic_ancestor(base, class_bases, seen):
+            return True
+    return False
+
+
+def classify_miss(
+    node: ast.Call,
+    *,
+    enclosing_class_fqn: str | None = None,
+    class_bases: dict[str, list[str]] | None = None,
+) -> str:
+    """Classify why a call could not be resolved. Returns a pattern tag.
+
+    The optional kwargs let the classifier recognise `super().method(...)`
+    on pydantic BaseModel subclasses and route them to pydantic_method_call
+    instead of super_unresolved.
+    """
     func = node.func
 
     if isinstance(func, ast.Subscript):
@@ -174,6 +237,15 @@ def classify_miss(node: ast.Call) -> str:
             return "literal_method_call"
         # super().foo() — value of the outer Attribute is a Call to super()
         if isinstance(cur, ast.Call) and isinstance(cur.func, ast.Name) and cur.func.id == "super":
+            # Pydantic BaseModel subclass calling super().__init__(**data) etc.
+            # Route to pydantic_method_call if the enclosing class has a
+            # BaseModel ancestor (shallow base-name heuristic).
+            if (
+                enclosing_class_fqn is not None
+                and class_bases is not None
+                and _has_pydantic_ancestor(enclosing_class_fqn, class_bases)
+            ):
+                return "pydantic_method_call"
             return "super_unresolved"
 
         chain = attr_chain(func)
@@ -185,8 +257,16 @@ def classify_miss(node: ast.Call) -> str:
                 return "importlib_import_module"
             if chain[0] == "self":
                 return "self_method_unresolved"
-            if chain[0] != "self" and chain[-1] in BUILTIN_COLLECTION_METHODS:
-                return "builtin_method_call"
+            method = chain[-1]
+            if chain[0] != "self":
+                if method in BUILTIN_COLLECTION_METHODS:
+                    return "builtin_method_call"
+                if method in PATHLIB_METHODS:
+                    return "pathlib_method_call"
+                if method in FUTURES_METHODS:
+                    return "futures_method_call"
+                if method in PYDANTIC_METHODS:
+                    return "pydantic_method_call"
         return "attr_chain_unresolved"
 
     return "other_unresolved"
