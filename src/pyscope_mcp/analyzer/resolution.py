@@ -132,6 +132,8 @@ class ResolveCtx:
     known_classes: set[str] = None  # type: ignore[assignment]
     # {class_fqn: {attr_name: inferred_class_fqn}} — populated in pass 1
     self_attr_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
+    # {func_fqn: {var_name: class_fqn}} — populated in pass 1 by collect_local_var_types
+    local_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         # Default to empty set/dict so callers that don't supply it still work.
@@ -139,6 +141,8 @@ class ResolveCtx:
             object.__setattr__(self, "known_classes", set())
         if self.self_attr_types is None:
             object.__setattr__(self, "self_attr_types", {})
+        if self.local_types is None:
+            object.__setattr__(self, "local_types", {})
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +212,66 @@ def resolve_self_attr_method(
     if candidate in ctx.known_fqns:
         return candidate
     return walk_mro(attr_class, method, ctx.class_bases, ctx.known_fqns)
+
+
+# ---------------------------------------------------------------------------
+# Local-variable type resolution
+# ---------------------------------------------------------------------------
+
+def resolve_local_var_method(
+    node: ast.Attribute,
+    enclosing_func_fqn: str,
+    ctx: ResolveCtx,
+) -> str | None:
+    """For ``var.method`` attribute-chain calls where ``var`` is a local variable
+    statically bound to an in-package class via ``ctx.local_types``.
+
+    1. Extract the variable name from ``node.value`` (must be a bare ``ast.Name``).
+    2. Look up the class FQN in ``ctx.local_types[enclosing_func_fqn]``.
+    3. Walk MRO to find the method. Return FQN or None.
+
+    Returns None silently on any failure. Does not mutate state.
+    """
+    if not isinstance(node.value, ast.Name):
+        return None
+    var_name = node.value.id
+    method = node.attr
+    func_vars = ctx.local_types.get(enclosing_func_fqn)
+    if func_vars is None:
+        return None
+    class_fqn = func_vars.get(var_name)
+    if class_fqn is None:
+        return None
+    candidate = f"{class_fqn}.{method}"
+    if candidate in ctx.known_fqns:
+        return candidate
+    return walk_mro(class_fqn, method, ctx.class_bases, ctx.known_fqns)
+
+
+def resolve_call_result_method(
+    node: ast.Attribute,
+    ctx: ResolveCtx,
+) -> str | None:
+    """For ``ClassName(...).method`` chains where the Call's func resolves to an
+    in-package class constructor; walk_mro from that class.
+
+    This covers the ``ClassName(...).method()`` pattern using the same
+    ``infer_call_class_type`` machinery but exposed as a standalone resolver
+    for use as a late fallback in the visitor.
+
+    Returns None silently on any failure. Does not mutate state.
+    """
+    if not isinstance(node.value, ast.Call):
+        return None
+    inner_call = node.value
+    # super() is handled by a separate resolver; skip it here.
+    if isinstance(inner_call.func, ast.Name) and inner_call.func.id == "super":
+        return None
+    class_fqn = infer_call_class_type(inner_call, ctx)
+    if class_fqn is None:
+        return None
+    method = node.attr
+    candidate = f"{class_fqn}.{method}"
+    if candidate in ctx.known_fqns:
+        return candidate
+    return walk_mro(class_fqn, method, ctx.class_bases, ctx.known_fqns)

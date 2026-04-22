@@ -11,6 +11,7 @@ from .resolution import (
     dispatcher_callable_arg,
     infer_call_class_type,
     is_dispatcher_call,
+    resolve_local_var_method,
     resolve_self_attr_method,
     walk_mro,
 )
@@ -35,6 +36,7 @@ class EdgeVisitor(ast.NodeVisitor):
         miss_log: MissLog | None = None,
         known_classes: set[str] | None = None,
         self_attr_types: dict[str, dict[str, str]] | None = None,
+        local_types: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._ctx = ResolveCtx(
             module_fqn=module_fqn,
@@ -43,6 +45,7 @@ class EdgeVisitor(ast.NodeVisitor):
             class_bases=class_bases,
             known_classes=known_classes or set(),
             self_attr_types=self_attr_types or {},
+            local_types=local_types or {},
         )
         self._file_path = file_path
         self._miss_log = miss_log
@@ -57,6 +60,25 @@ class EdgeVisitor(ast.NodeVisitor):
         if self._scope_stack:
             return f"{self._ctx.module_fqn}.{'.'.join(self._scope_stack)}"
         return self._ctx.module_fqn
+
+    def _current_func_fqn(self) -> str | None:
+        """Return the FQN of the innermost enclosing function/method scope, or None.
+
+        Walks the scope stack inside-out, skipping scopes that are known classes.
+        Returns the first scope FQN that is NOT a known class (i.e. a function or
+        nested function). Returns None at module level or if we're only inside classes.
+
+        Note: nested functions may not be in ``known_fqns`` (``collect_defs`` only
+        goes two levels deep), so we cannot rely on ``known_fqns`` membership.
+        Instead we use ``known_classes`` as a negative filter: if a scope name at
+        a given depth IS a known class FQN, skip it; otherwise treat it as a function.
+        """
+        for i in range(len(self._scope_stack) - 1, -1, -1):
+            candidate = f"{self._ctx.module_fqn}.{'.'.join(self._scope_stack[:i + 1])}"
+            # Skip known-class scopes; everything else is a function scope.
+            if candidate not in self._ctx.known_classes:
+                return candidate
+        return None
 
     def _enclosing_class_fqn(self) -> str | None:
         """FQN of the enclosing class, walking inside-out through the scope stack.
@@ -150,6 +172,17 @@ class EdgeVisitor(ast.NodeVisitor):
                         attr_name, method, class_fqn, self._ctx
                     )
                 return None
+
+            # Local-variable type tracking fallback: var.method() where var is
+            # a local variable statically bound to an in-package class.
+            # Only applies to 2-part chains (var.method); longer chains go through
+            # the import-table prefix resolution below.
+            if len(chain) == 2 and chain[0] != "self":
+                func_fqn = self._current_func_fqn()
+                if func_fqn is not None:
+                    resolved = resolve_local_var_method(func_node, func_fqn, self._ctx)
+                    if resolved is not None:
+                        return resolved
 
             # Deeper attribute chain — longest-prefix against import table.
             for prefix_len in range(len(chain) - 1, 0, -1):

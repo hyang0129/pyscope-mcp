@@ -230,6 +230,327 @@ def _infer_type(
     return None
 
 
+def collect_local_var_types(
+    tree: ast.AST,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+) -> dict[str, dict[str, str]]:
+    """Map ``{func_fqn: {var_name: class_fqn}}`` for local variable bindings.
+
+    Scans each function/method body for statically resolvable variable
+    bindings of the form:
+
+    - ``x = ClassName(...)`` — constructor call (Assign).
+    - ``x: ClassName = ...`` — annotated assignment (AnnAssign), RHS ignored.
+    - Parameter annotations: ``def f(self, x: ClassName)`` — x tracked.
+      ``self`` / ``cls`` are skipped.
+
+    Last-write-wins: later bindings overwrite earlier ones (by source line).
+    Only records bindings where the class resolves to an in-package class FQN
+    (i.e. the FQN is in ``known_classes``).
+
+    Scope rules:
+    - Each function/method/lambda gets its own dict keyed by its FQN.
+    - Nested function bodies are NOT descended into (they get their own entry).
+    - Loop targets (for x in xs) are NOT tracked.
+    - Comprehension targets are NOT tracked.
+    - Tuple-unpack targets (a, b = X(), Y()) are NOT tracked. TODO: v2.
+    - Lambda parameters are NOT tracked (type annotations unsupported on lambdas).
+    """
+    result: dict[str, dict[str, str]] = {}
+    _collect_func_local_types(tree, module_fqn, module_fqn, import_table, known_classes, result)
+    return result
+
+
+def _resolve_annotation_to_class(
+    annotation: ast.expr | str,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+) -> str | None:
+    """Resolve a type annotation (or forward-ref string) to an in-package class FQN."""
+    # Handle forward-reference string annotations e.g. "ClassName" or "mod.ClassName"
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        raw = annotation.value.strip()
+        # Try as a simple name first
+        if "." not in raw:
+            if raw in import_table:
+                candidate = import_table[raw]
+                if candidate in known_classes:
+                    return candidate
+            candidate = f"{module_fqn}.{raw}"
+            if candidate in known_classes:
+                return candidate
+            return None
+        # Dotted string: try longest-prefix lookup
+        parts = raw.split(".")
+        for prefix_len in range(len(parts) - 1, 0, -1):
+            prefix = ".".join(parts[:prefix_len])
+            if prefix in import_table:
+                base_fqn = import_table[prefix]
+                remainder = parts[prefix_len:]
+                candidate = ".".join([base_fqn] + remainder)
+                if candidate in known_classes:
+                    return candidate
+        dotted = raw
+        if dotted in known_classes:
+            return dotted
+        return None
+
+    if isinstance(annotation, ast.Name):
+        name = annotation.id
+        if name in import_table:
+            candidate = import_table[name]
+            if candidate in known_classes:
+                return candidate
+        candidate = f"{module_fqn}.{name}"
+        if candidate in known_classes:
+            return candidate
+        return None
+
+    chain = attr_chain(annotation)
+    if chain is None:
+        return None
+    for prefix_len in range(len(chain) - 1, 0, -1):
+        prefix = ".".join(chain[:prefix_len])
+        if prefix in import_table:
+            base_fqn = import_table[prefix]
+            remainder = chain[prefix_len:]
+            candidate = ".".join([base_fqn] + remainder)
+            if candidate in known_classes:
+                return candidate
+    dotted = ".".join(chain)
+    if dotted in known_classes:
+        return dotted
+    return None
+
+
+def _infer_constructor_class(
+    rhs: ast.expr,
+    module_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+) -> str | None:
+    """Infer class FQN if RHS is a constructor call to an in-package class."""
+    if not isinstance(rhs, ast.Call):
+        return None
+    func = rhs.func
+    if isinstance(func, ast.Name):
+        name = func.id
+        if name in import_table:
+            candidate = import_table[name]
+            if candidate in known_classes:
+                return candidate
+        candidate = f"{module_fqn}.{name}"
+        if candidate in known_classes:
+            return candidate
+        return None
+    chain = attr_chain(func)
+    if chain is not None:
+        for prefix_len in range(len(chain) - 1, 0, -1):
+            prefix = ".".join(chain[:prefix_len])
+            if prefix in import_table:
+                base_fqn = import_table[prefix]
+                remainder = chain[prefix_len:]
+                candidate = ".".join([base_fqn] + remainder)
+                if candidate in known_classes:
+                    return candidate
+        dotted = ".".join(chain)
+        if dotted in known_classes:
+            return dotted
+    return None
+
+
+def _collect_func_local_types(
+    node: ast.AST,
+    module_fqn: str,
+    func_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+    result: dict[str, dict[str, str]],
+) -> None:
+    """Recursively collect local var types for each function scope.
+
+    Descends into ClassDef to find methods, but stops descent when entering
+    a nested FunctionDef/AsyncFunctionDef (that scope gets its own entry).
+    """
+    # For module-level: walk top-level nodes.
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef):
+            class_fqn = f"{func_fqn}.{child.name}" if func_fqn != module_fqn else f"{module_fqn}.{child.name}"
+            _collect_func_local_types(child, module_fqn, class_fqn, import_table, known_classes, result)
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            child_fqn = f"{func_fqn}.{child.name}"
+            _scan_function_body(child, module_fqn, child_fqn, import_table, known_classes, result)
+
+
+def _iter_direct_nested_funcs(
+    stmts: list[ast.stmt],
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Yield FunctionDef/AsyncFunctionDef nodes that are directly (shallowly) nested.
+
+    Descends into if/for/while/with/try bodies (where a def can appear) but
+    does NOT descend into nested function bodies — those are separate scopes.
+    """
+    found: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            found.append(stmt)
+        elif isinstance(stmt, ast.If):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, ast.For):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, ast.While):
+            found.extend(_iter_direct_nested_funcs(stmt.body + stmt.orelse))
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            found.extend(_iter_direct_nested_funcs(stmt.body))
+        elif isinstance(stmt, ast.Try):
+            all_stmts = stmt.body + stmt.orelse + stmt.finalbody
+            for handler in stmt.handlers:
+                all_stmts += handler.body
+            found.extend(_iter_direct_nested_funcs(all_stmts))
+    return found
+
+
+def _scan_function_body(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_fqn: str,
+    func_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+    result: dict[str, dict[str, str]],
+) -> None:
+    """Scan a single function body (non-recursive into nested funcs).
+
+    Collects bindings ordered by source line (last-write-wins).
+    Also recurses into nested functions as separate scopes.
+    """
+    var_types: dict[str, str] = {}
+
+    # Collect parameter annotations (skip self/cls).
+    SKIP_PARAMS = {"self", "cls"}
+    for arg in func_node.args.args + func_node.args.posonlyargs + func_node.args.kwonlyargs:
+        if arg.arg in SKIP_PARAMS:
+            continue
+        if arg.annotation is not None:
+            resolved = _resolve_annotation_to_class(
+                arg.annotation, module_fqn, import_table, known_classes
+            )
+            if resolved is not None:
+                var_types[arg.arg] = resolved
+
+    # Walk the direct body — collect Assign and AnnAssign, but do NOT descend
+    # into nested function bodies (collect those as separate scopes).
+    _walk_body_for_bindings(
+        func_node.body, module_fqn, func_fqn, import_table, known_classes,
+        var_types, result,
+    )
+
+    if var_types:
+        result[func_fqn] = var_types
+
+    # Recurse into directly-nested functions as separate scopes.
+    # We must NOT use ast.walk here — it descends transitively and would visit
+    # doubly-nested functions twice (once from this scope's walk, and again
+    # when the intermediate scope's _scan_function_body runs its own walk).
+    # Instead collect only direct-child function defs from the body stmts.
+    for nested in _iter_direct_nested_funcs(func_node.body):
+        nested_fqn = f"{func_fqn}.{nested.name}"
+        _scan_function_body(nested, module_fqn, nested_fqn, import_table, known_classes, result)
+
+
+def _walk_body_for_bindings(
+    stmts: list[ast.stmt],
+    module_fqn: str,
+    func_fqn: str,
+    import_table: dict[str, str],
+    known_classes: set[str],
+    var_types: dict[str, str],
+    result: dict[str, dict[str, str]],
+) -> None:
+    """Walk a statement list collecting Assign/AnnAssign bindings.
+
+    Does NOT descend into nested function/async-function bodies.
+    Descends into if/for/while/with/try bodies for assignments in those blocks,
+    but for-loop targets are skipped (element type is unknown).
+    """
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Nested function — do NOT descend; it's a separate scope.
+            continue
+
+        if isinstance(stmt, ast.ClassDef):
+            # Nested class — skip; not a variable binding in this scope.
+            continue
+
+        if isinstance(stmt, ast.Assign):
+            # Only handle single, simple-name targets (skip tuple-unpack). TODO: v2 tuple-unpack.
+            if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                var_name = stmt.targets[0].id
+                resolved = _infer_constructor_class(
+                    stmt.value, module_fqn, import_table, known_classes
+                )
+                if resolved is not None:
+                    var_types[var_name] = resolved
+
+        elif isinstance(stmt, ast.AnnAssign):
+            # x: ClassName = ... — use annotation, ignore RHS.
+            if isinstance(stmt.target, ast.Name) and stmt.annotation is not None:
+                var_name = stmt.target.id
+                resolved = _resolve_annotation_to_class(
+                    stmt.annotation, module_fqn, import_table, known_classes
+                )
+                if resolved is not None:
+                    var_types[var_name] = resolved
+
+        elif isinstance(stmt, ast.For):
+            # for x in xs: — skip the loop target but descend into body.
+            _walk_body_for_bindings(
+                stmt.body + stmt.orelse,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+        elif isinstance(stmt, ast.While):
+            _walk_body_for_bindings(
+                stmt.body + stmt.orelse,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+        elif isinstance(stmt, ast.If):
+            _walk_body_for_bindings(
+                stmt.body + stmt.orelse,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+        elif isinstance(stmt, ast.With):
+            _walk_body_for_bindings(
+                stmt.body,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+        elif isinstance(stmt, ast.AsyncWith):
+            _walk_body_for_bindings(
+                stmt.body,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+        elif isinstance(stmt, ast.Try):
+            all_stmts = stmt.body + stmt.orelse + stmt.finalbody
+            for handler in stmt.handlers:
+                all_stmts += handler.body
+            _walk_body_for_bindings(
+                all_stmts,
+                module_fqn, func_fqn, import_table, known_classes,
+                var_types, result,
+            )
+
+
 def _resolve_base(
     base: ast.expr,
     module_fqn: str,
