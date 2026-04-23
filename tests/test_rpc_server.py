@@ -284,6 +284,24 @@ async def test_search_missing_query(server: RpcServer):
     assert responses[0]["result"]["isError"] is True
 
 
+@pytest.mark.asyncio
+async def test_module_callers_missing_module(server: RpcServer):
+    """Missing required 'module' returns isError:true, not a JSON-RPC error."""
+    lines = [_req("tools/call", {"name": "module_callers", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    assert "result" in responses[0]
+    assert responses[0]["result"]["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_module_callees_missing_module(server: RpcServer):
+    """Missing required 'module' returns isError:true, not a JSON-RPC error."""
+    lines = [_req("tools/call", {"name": "module_callees", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    assert "result" in responses[0]
+    assert responses[0]["result"]["isError"] is True
+
+
 # ---------------------------------------------------------------------------
 # Unknown tool name → isError:true (NOT a JSON-RPC error)
 # ---------------------------------------------------------------------------
@@ -398,6 +416,9 @@ async def test_shutdown(server: RpcServer):
     lines = [_req("shutdown", req_id=1)]
     responses = await _run(server, lines)
     assert responses[0]["result"] == {}
+    # Verify that _shutdown_requested is set — the behavioral invariant
+    # established by _handle_shutdown.
+    assert server._shutdown_requested is True
 
 
 # ---------------------------------------------------------------------------
