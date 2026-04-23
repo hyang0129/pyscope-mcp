@@ -14,3 +14,4 @@ htmlcov/
 *.log
 .env
 .pyscope-mcp/
+uv.lock
