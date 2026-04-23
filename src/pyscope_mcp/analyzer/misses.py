@@ -211,6 +211,8 @@ ACCEPTED_PATTERNS: frozenset[str] = frozenset({
     # M8 additions
     "io_method_call", "hashlib_method_call", "random_method_call",
     "argparse_method_call", "anthropic_method_call", "requests_method_call",
+    # Handler #19: external-factory local-var accept buckets
+    "httpx_method_call", "boto3_method_call", "typer_method_call", "googleapi_method_call",
 })
 
 

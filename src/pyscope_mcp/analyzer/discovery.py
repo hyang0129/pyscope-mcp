@@ -366,6 +366,223 @@ def _infer_type(
     return None
 
 
+def collect_external_local_var_types(
+    tree: ast.AST,
+    module_fqn: str,
+    import_table: dict[str, str],
+    external_factories: dict[str, str],
+) -> dict[str, dict[str, str]]:
+    """Map ``{func_fqn: {var_name: external_factory_fqn}}`` for locals bound
+    from a whitelisted external factory call.
+
+    Mirrors ``collect_local_var_types`` but targets external FQNs (not
+    in-package classes).  Only records bindings where the resolved factory
+    FQN appears in ``external_factories`` (the whitelist).
+
+    Also handles second-order (chained) bindings: if the RHS is a method
+    call on an already-typed external local (e.g. ``paginator =
+    client.get_paginator(...)``) and that ``(factory_fqn, method)`` pair
+    maps to a known return type in ``EXTERNAL_RETURNS``, the result type
+    is recorded too.
+
+    Scope/last-write-wins rules are identical to ``collect_local_var_types``.
+    """
+    from .resolution import EXTERNAL_RETURNS  # avoid circular at module level
+    result: dict[str, dict[str, str]] = {}
+    # Collect module-level external factory bindings (e.g. `_cli = typer.Typer()` at top level).
+    # These are keyed under the module_fqn so the visitor can find them when
+    # a function-level lookup misses.
+    module_vars: dict[str, str] = {}
+    if isinstance(tree, ast.Module):
+        _walk_body_for_external_bindings(
+            tree.body, module_fqn, import_table, external_factories,
+            EXTERNAL_RETURNS, module_vars,
+        )
+        if module_vars:
+            result[module_fqn] = module_vars
+    _collect_func_external_types(
+        tree, module_fqn, module_fqn, import_table, external_factories, result
+    )
+    return result
+
+
+def _resolve_external_factory(
+    rhs: ast.expr,
+    import_table: dict[str, str],
+    external_factories: dict[str, str],
+) -> str | None:
+    """If ``rhs`` is a call to a whitelisted external factory, return the factory FQN."""
+    if not isinstance(rhs, ast.Call):
+        return None
+    func = rhs.func
+    if isinstance(func, ast.Name):
+        name = func.id
+        if name in import_table:
+            fqn = import_table[name]
+            if fqn in external_factories:
+                return external_factories[fqn]
+        return None
+    chain = attr_chain(func)
+    if chain is not None:
+        for prefix_len in range(len(chain) - 1, 0, -1):
+            prefix = ".".join(chain[:prefix_len])
+            if prefix in import_table:
+                base_fqn = import_table[prefix]
+                remainder = chain[prefix_len:]
+                candidate = ".".join([base_fqn] + remainder)
+                if candidate in external_factories:
+                    return external_factories[candidate]
+        dotted = ".".join(chain)
+        if dotted in external_factories:
+            return external_factories[dotted]
+    return None
+
+
+def _resolve_chained_external_factory(
+    rhs: ast.expr,
+    partial_vars: dict[str, str],
+    external_returns: dict[tuple[str, str], str],
+) -> str | None:
+    """If ``rhs`` is ``var.method(...)`` and ``var`` is already a typed external
+    local, look up ``(factory_fqn, method)`` in ``external_returns``.
+    """
+    if not isinstance(rhs, ast.Call):
+        return None
+    func = rhs.func
+    if not isinstance(func, ast.Attribute):
+        return None
+    if not isinstance(func.value, ast.Name):
+        return None
+    var_name = func.value.id
+    method = func.attr
+    factory_fqn = partial_vars.get(var_name)
+    if factory_fqn is None:
+        return None
+    return external_returns.get((factory_fqn, method))
+
+
+def _collect_func_external_types(
+    node: ast.AST,
+    module_fqn: str,
+    func_fqn: str,
+    import_table: dict[str, str],
+    external_factories: dict[str, str],
+    result: dict[str, dict[str, str]],
+) -> None:
+    """Recursively collect external factory var types for each function scope."""
+    from .resolution import EXTERNAL_RETURNS
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.ClassDef):
+            class_fqn = (
+                f"{func_fqn}.{child.name}"
+                if func_fqn != module_fqn
+                else f"{module_fqn}.{child.name}"
+            )
+            _collect_func_external_types(
+                child, module_fqn, class_fqn, import_table, external_factories, result
+            )
+        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            child_fqn = f"{func_fqn}.{child.name}"
+            _scan_function_external_bindings(
+                child, module_fqn, child_fqn, import_table, external_factories,
+                EXTERNAL_RETURNS, result
+            )
+
+
+def _scan_function_external_bindings(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    module_fqn: str,
+    func_fqn: str,
+    import_table: dict[str, str],
+    external_factories: dict[str, str],
+    external_returns: dict[tuple[str, str], str],
+    result: dict[str, dict[str, str]],
+) -> None:
+    """Scan a single function body for external-factory bindings (non-recursive)."""
+    var_types: dict[str, str] = {}
+    _walk_body_for_external_bindings(
+        func_node.body, module_fqn, import_table, external_factories,
+        external_returns, var_types,
+    )
+    if var_types:
+        result[func_fqn] = var_types
+
+    # Recurse into nested functions.
+    for nested in _iter_direct_nested_funcs(func_node.body):
+        nested_fqn = f"{func_fqn}.{nested.name}"
+        _scan_function_external_bindings(
+            nested, module_fqn, nested_fqn, import_table, external_factories,
+            external_returns, result
+        )
+
+
+def _walk_body_for_external_bindings(
+    stmts: list[ast.stmt],
+    module_fqn: str,
+    import_table: dict[str, str],
+    external_factories: dict[str, str],
+    external_returns: dict[tuple[str, str], str],
+    var_types: dict[str, str],
+) -> None:
+    """Walk a statement list collecting external-factory Assign bindings."""
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+
+        if isinstance(stmt, ast.Assign):
+            if len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                var_name = stmt.targets[0].id
+                # Direct factory call
+                resolved = _resolve_external_factory(
+                    stmt.value, import_table, external_factories
+                )
+                if resolved is None:
+                    # Chained: var.method(...) where var is already typed
+                    resolved = _resolve_chained_external_factory(
+                        stmt.value, var_types, external_returns
+                    )
+                # last-write-wins: always overwrite
+                if resolved is not None:
+                    var_types[var_name] = resolved
+                elif var_name in var_types:
+                    # var was rebound to something non-factory → shadow, remove
+                    del var_types[var_name]
+
+        elif isinstance(stmt, ast.For):
+            _walk_body_for_external_bindings(
+                stmt.body + stmt.orelse, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+        elif isinstance(stmt, ast.While):
+            _walk_body_for_external_bindings(
+                stmt.body + stmt.orelse, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+        elif isinstance(stmt, ast.If):
+            _walk_body_for_external_bindings(
+                stmt.body + stmt.orelse, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+        elif isinstance(stmt, ast.With):
+            _walk_body_for_external_bindings(
+                stmt.body, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+        elif isinstance(stmt, ast.AsyncWith):
+            _walk_body_for_external_bindings(
+                stmt.body, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+        elif isinstance(stmt, ast.Try):
+            all_stmts = stmt.body + stmt.orelse + stmt.finalbody
+            for handler in stmt.handlers:
+                all_stmts += handler.body
+            _walk_body_for_external_bindings(
+                all_stmts, module_fqn, import_table,
+                external_factories, external_returns, var_types,
+            )
+
+
 def collect_local_var_types(
     tree: ast.AST,
     module_fqn: str,

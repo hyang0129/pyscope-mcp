@@ -26,6 +26,42 @@ def attr_chain(node: ast.expr) -> list[str] | None:
 
 
 # ---------------------------------------------------------------------------
+# External-factory whitelist (Handler #19)
+# ---------------------------------------------------------------------------
+
+# Map from external factory FQN → descriptive label (which is also the FQN
+# stored in external_local_types so the classifier can look up a bucket).
+# Start narrow — additional factories are future PRs keyed to observed misses.
+EXTERNAL_FACTORIES: dict[str, str] = {
+    "httpx.Client": "httpx.Client",
+    "httpx.AsyncClient": "httpx.AsyncClient",
+    "boto3.client": "boto3.client",
+    "boto3.resource": "boto3.resource",
+    "typer.Typer": "typer.Typer",
+    "googleapiclient.discovery.build": "googleapiclient.discovery.Resource",
+}
+
+# Second-order (chained) factory returns: (factory_fqn, method) → return type FQN.
+# Used by collect_external_local_var_types to resolve e.g.
+# paginator = client.get_paginator(...) where client is a boto3.client.
+EXTERNAL_RETURNS: dict[tuple[str, str], str] = {
+    ("boto3.client", "get_paginator"): "boto3.paginator.Paginator",
+    ("boto3.resource", "get_paginator"): "boto3.paginator.Paginator",
+}
+
+# Map external factory FQN → accepted classifier bucket name.
+EXTERNAL_FACTORY_BUCKETS: dict[str, str] = {
+    "httpx.Client": "httpx_method_call",
+    "httpx.AsyncClient": "httpx_method_call",
+    "boto3.client": "boto3_method_call",
+    "boto3.resource": "boto3_method_call",
+    "boto3.paginator.Paginator": "boto3_method_call",
+    "typer.Typer": "typer_method_call",
+    "googleapiclient.discovery.Resource": "googleapi_method_call",
+}
+
+
+# ---------------------------------------------------------------------------
 # Class hierarchy (MRO) resolution
 # ---------------------------------------------------------------------------
 
@@ -134,6 +170,8 @@ class ResolveCtx:
     self_attr_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
     # {func_fqn: {var_name: class_fqn}} — populated in pass 1 by collect_local_var_types
     local_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
+    # {func_fqn: {var_name: external_factory_fqn}} — populated by collect_external_local_var_types
+    external_local_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         # Default to empty set/dict so callers that don't supply it still work.
@@ -143,6 +181,8 @@ class ResolveCtx:
             object.__setattr__(self, "self_attr_types", {})
         if self.local_types is None:
             object.__setattr__(self, "local_types", {})
+        if self.external_local_types is None:
+            object.__setattr__(self, "external_local_types", {})
 
 
 # ---------------------------------------------------------------------------
