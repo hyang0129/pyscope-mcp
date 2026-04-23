@@ -21,10 +21,13 @@ from unittest.mock import patch
 
 import pytest
 
+from pyscope_mcp import __version__ as PYSCOPE_VERSION
 from pyscope_mcp._rpc import (
+    INVALID_PARAMS,
     INVALID_REQUEST,
     METHOD_NOT_FOUND,
     PARSE_ERROR,
+    RpcError,
     RpcServer,
 )
 from pyscope_mcp.graph import CallGraphIndex
@@ -53,7 +56,14 @@ class FakeReader:
 
 
 class FakeWriter:
-    """Captures bytes written by the RPC loop."""
+    """Captures bytes written by the RPC loop.
+
+    Note: drain() is a no-op. This harness does not exercise backpressure or
+    the FlowControlMixin vs BaseProtocol distinction — wire-level behaviour
+    (e.g. StreamWriter.drain() against a real pipe) is covered by
+    tests/test_rpc_stdio_e2e.py. Treat unit coverage here as dispatch-layer
+    only.
+    """
 
     def __init__(self) -> None:
         self.chunks: list[bytes] = []
@@ -437,7 +447,15 @@ async def test_initialize_known_version(server: RpcServer):
 
 @pytest.mark.asyncio
 async def test_initialize_unknown_version_fallback(server: RpcServer):
-    """Unknown version falls back to newest."""
+    """Unknown version falls back to newest.
+
+    Decision (PR #41 review, §1): issue #40 originally said "reject unknown
+    major versions with JSON-RPC error", but the MCP spec itself permits a
+    server to respond with a protocol version it supports when the client
+    requests one it does not know. We chose code-wins: silently negotiate
+    down to the newest known version rather than erroring. This test pins
+    that behaviour so the drift cannot reappear silently.
+    """
     server._initialized = False
     lines = [_req("initialize", {"protocolVersion": "2099-01-01"}, req_id=1)]
     responses = await _run(server, lines)
@@ -606,4 +624,350 @@ def test_cold_import_budget():
     assert elapsed_ms < 500, (
         f"Cold import took {elapsed_ms:.0f} ms — exceeds 500 ms budget. "
         "Check that no heavy dependencies are imported at module level."
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR #41 review follow-ups — §§1-4 of the review comment
+# ---------------------------------------------------------------------------
+
+# --- initialize handshake edges -------------------------------------------
+
+@pytest.mark.asyncio
+async def test_initialize_missing_protocol_version(server: RpcServer):
+    """Omitting protocolVersion hits the `p.get(..., _NEWEST_VERSION)` default."""
+    server._initialized = False
+    lines = [_req("initialize", {"clientInfo": {"name": "t"}}, req_id=1)]
+    responses = await _run(server, lines)
+    assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
+
+
+@pytest.mark.asyncio
+async def test_initialize_no_params(server: RpcServer):
+    """No `params` key at all — exercises the `params or {}` branch."""
+    server._initialized = False
+    lines = [_req("initialize", req_id=1)]
+    responses = await _run(server, lines)
+    assert "result" in responses[0]
+    assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
+
+
+@pytest.mark.asyncio
+async def test_initialize_response_shape(server: RpcServer):
+    """serverInfo.version matches pyscope_mcp.__version__; instructions present."""
+    server._initialized = False
+    lines = [_req("initialize", {"protocolVersion": "2025-06-18"}, req_id=1)]
+    responses = await _run(server, lines)
+    result = responses[0]["result"]
+    assert result["serverInfo"]["name"] == "pyscope-mcp"
+    assert result["serverInfo"]["version"] == PYSCOPE_VERSION
+    assert "instructions" in result
+    assert isinstance(result["instructions"], str)
+    assert result["instructions"].strip(), "instructions must be non-empty"
+
+
+# --- RpcError branch inside a handler --------------------------------------
+
+@pytest.mark.asyncio
+async def test_handler_raises_rpc_error(server: RpcServer):
+    """RpcError raised inside a handler becomes a JSON-RPC error response, not isError."""
+    import pyscope_mcp.server as srv
+
+    async def _raises_rpc(name, arguments):
+        raise RpcError(INVALID_PARAMS, "bad args")
+
+    with patch.object(srv, "_dispatch_tool", _raises_rpc):
+        lines = [_req("tools/call", {"name": "stats", "arguments": {}}, req_id=7)]
+        responses = await _run(server, lines)
+    r = responses[0]
+    assert "error" in r, "RpcError must surface as JSON-RPC error, not result.isError"
+    assert r["error"]["code"] == INVALID_PARAMS
+    assert r["error"]["message"] == "bad args"
+    assert "result" not in r
+
+
+@pytest.mark.asyncio
+async def test_no_index_path_returns_rpc_error(server: RpcServer):
+    """_INDEX_PATH=None → _get_index raises RpcError(INVALID_PARAMS) → JSON-RPC error."""
+    import pyscope_mcp.server as srv
+
+    srv._INDEX_PATH = None
+    srv._INDEX = None
+    lines = [_req("tools/call", {"name": "stats", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]
+    assert "error" in r
+    assert r["error"]["code"] == INVALID_PARAMS
+
+
+# --- tools/list behaviour --------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tools_list_ignores_cursor_and_omits_next_cursor(server: RpcServer):
+    """Spec: ignore `cursor`, never emit `nextCursor`."""
+    lines = [_req("tools/list", {"cursor": "xyz"}, req_id=1)]
+    responses = await _run(server, lines)
+    result = responses[0]["result"]
+    assert "tools" in result
+    assert "nextCursor" not in result
+    assert len(result["tools"]) == 7
+
+
+@pytest.mark.asyncio
+async def test_tools_list_shape(server: RpcServer):
+    """Every tool entry has name, description, inputSchema, annotations."""
+    lines = [_req("tools/list", req_id=1)]
+    responses = await _run(server, lines)
+    tools = responses[0]["result"]["tools"]
+    for t in tools:
+        assert isinstance(t.get("name"), str) and t["name"]
+        assert isinstance(t.get("description"), str) and t["description"]
+        assert isinstance(t.get("inputSchema"), dict)
+        assert t["inputSchema"].get("type") == "object"
+        assert isinstance(t.get("annotations"), dict)
+
+
+# --- permissive parsing ----------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_permissive_unknown_top_level_fields(server: RpcServer):
+    """Unknown top-level keys (_meta, progressToken, extras) must not crash."""
+    lines = [
+        _line({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "_meta": {"progressToken": "x"},
+            "extra": 42,
+        })
+    ]
+    responses = await _run(server, lines)
+    assert responses[0]["id"] == 1
+    assert responses[0]["result"] == {}
+
+
+# --- malformed-request edge cases -----------------------------------------
+
+@pytest.mark.asyncio
+async def test_parse_error_id_is_null(server: RpcServer):
+    """Per JSON-RPC 2.0, parse-error responses MUST carry id=null."""
+    lines = [b"this is not json"]
+    responses = await _run(server, lines)
+    assert responses[0]["error"]["code"] == PARSE_ERROR
+    assert responses[0]["id"] is None
+
+
+@pytest.mark.asyncio
+async def test_missing_method_field(server: RpcServer):
+    """Request with jsonrpc=2.0 but no `method` → -32600."""
+    lines = [_line({"jsonrpc": "2.0", "id": 1})]
+    responses = await _run(server, lines)
+    assert responses[0]["error"]["code"] == INVALID_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_non_string_method(server: RpcServer):
+    """`method` that is not a string → -32600."""
+    lines = [_line({"jsonrpc": "2.0", "id": 1, "method": 123})]
+    responses = await _run(server, lines)
+    assert responses[0]["error"]["code"] == INVALID_REQUEST
+
+
+@pytest.mark.asyncio
+async def test_params_non_object(server: RpcServer):
+    """Non-object params (array) — the dispatcher should not crash the loop.
+
+    JSON-RPC 2.0 allows array params; tools/call handler coerces via `params or {}`
+    and will fall through to an isError result (no name key). Pin the behaviour.
+    """
+    lines = [
+        _line({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [1, 2, 3]}),
+        _req("ping", req_id=2),
+    ]
+    responses = await _run(server, lines)
+    # First response: should be a well-formed JSON-RPC frame (either error or
+    # result with isError) — what matters is the loop survived.
+    assert responses[0]["id"] == 1
+    assert ("error" in responses[0]) or (responses[0]["result"].get("isError") is True)
+    # Loop continues:
+    assert responses[1]["id"] == 2
+    assert responses[1]["result"] == {}
+
+
+# --- loop-liveness -----------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unknown_method_loop_continues(server: RpcServer):
+    """After an unknown-method error, the next request is still serviced."""
+    lines = [
+        _req("no_such_method", req_id=1),
+        _req("ping", req_id=2),
+    ]
+    responses = await _run(server, lines)
+    assert responses[0]["error"]["code"] == METHOD_NOT_FOUND
+    assert responses[1]["id"] == 2
+    assert responses[1]["result"] == {}
+
+
+@pytest.mark.asyncio
+async def test_blank_lines_ignored(server: RpcServer):
+    """Empty lines between requests are skipped, not turned into errors."""
+    lines = [
+        _req("ping", req_id=1),
+        b"",
+        _req("ping", req_id=2),
+    ]
+    responses = await _run(server, lines)
+    assert len(responses) == 2
+    assert responses[0]["id"] == 1
+    assert responses[1]["id"] == 2
+
+
+# --- notification semantics -----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_notification_unknown_method_silent(server: RpcServer):
+    """Notifications (no id) for unknown methods produce NO response."""
+    lines = [
+        _notif("nonsense/method"),
+        _req("ping", req_id=1),  # prove the loop kept going
+    ]
+    responses = await _run(server, lines)
+    # Only the ping response should be present
+    assert len(responses) == 1
+    assert responses[0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_handler_raises_silent(server: RpcServer):
+    """A notification whose handler raises produces NO response."""
+    # Register a handler on the server instance that always raises.
+    async def _bad_handler(id, params):  # noqa: A002
+        raise RuntimeError("kaboom")
+
+    server._handlers["test/raises"] = _bad_handler
+    try:
+        lines = [
+            _notif("test/raises"),
+            _req("ping", req_id=1),
+        ]
+        responses = await _run(server, lines)
+    finally:
+        del server._handlers["test/raises"]
+    # The failing notification must not produce a response frame.
+    assert len(responses) == 1
+    assert responses[0]["id"] == 1
+
+
+# --- per-tool wrong-type args ---------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name,arguments,expect_error",
+    [
+        # Wrong-type fqn / module: truthy values that aren't in the graph.
+        # _bfs handles unknown starts gracefully → empty list, isError:false.
+        ("callers_of",     {"fqn": 123},                             False),
+        ("callees_of",     {"fqn": 123},                             False),
+        ("module_callers", {"module": True},                         False),
+        # List-typed module: unhashable → TypeError on dict lookup → isError:true.
+        ("module_callees", {"module": ["pkg", "mod"]},               True),
+        # Non-string query: `.lower()` on dict raises AttributeError → isError:true.
+        ("search",         {"query": {"nested": 1}},                 True),
+        # Non-int depth: int("deep") raises ValueError → isError:true.
+        ("callers_of",     {"fqn": "pkg.mod.foo", "depth": "deep"},  True),
+        ("callees_of",     {"fqn": "pkg.mod.foo", "depth": "deep"},  True),
+    ],
+)
+async def test_tool_wrong_type_args(
+    server: RpcServer, name: str, arguments: dict, expect_error: bool
+):
+    """Pin the current behaviour for wrong-type arguments.
+
+    Two invariants matter: (a) tools/call always returns a result, never a
+    JSON-RPC error; (b) the loop survives. Whether isError is true depends
+    on whether the wrong-type value triggers an exception or silently
+    degrades in the underlying query — both are acceptable, we just want
+    drift in either direction to be noticed.
+    """
+    lines = [
+        _req("tools/call", {"name": name, "arguments": arguments}, req_id=1),
+        _req("ping", req_id=2),
+    ]
+    responses = await _run(server, lines)
+    r = responses[0]
+    assert "result" in r and "error" not in r
+    assert r["result"]["isError"] is expect_error
+    # Loop still alive:
+    assert responses[1]["id"] == 2
+    assert responses[1]["result"] == {}
+
+
+# --- reload actually re-reads disk ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_reload_reflects_disk_change(server: RpcServer, tmp_index: Path):
+    """Overwrite the index on disk, call reload, observe new stats."""
+    import pyscope_mcp.server as srv
+
+    # Baseline stats (3 functions, 2 edges)
+    lines = [_req("tools/call", {"name": "stats", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    before = json.loads(responses[0]["result"]["content"][0]["text"])
+
+    # Overwrite with a larger index
+    new_raw: dict[str, list[str]] = {
+        "a.b.c": ["a.b.d", "a.b.e"],
+        "a.b.d": ["a.b.f"],
+        "a.b.e": [],
+        "a.b.f": [],
+        "x.y.z": ["a.b.c"],
+    }
+    new_idx = CallGraphIndex.from_raw(tmp_index.parent, new_raw)
+    new_idx.save(tmp_index)
+
+    # Call reload then stats; must reflect the new counts.
+    lines = [
+        _req("tools/call", {"name": "reload", "arguments": {}}, req_id=2),
+        _req("tools/call", {"name": "stats", "arguments": {}}, req_id=3),
+    ]
+    responses = await _run(server, lines)
+    after_reload = json.loads(responses[0]["result"]["content"][0]["text"])
+    after_stats = json.loads(responses[1]["result"]["content"][0]["text"])
+
+    # Sanity: reload returned the new stats directly.
+    assert after_reload == after_stats
+    assert after_stats["functions"] != before["functions"] or \
+        after_stats["function_edges"] != before["function_edges"]
+    # Concrete check: 5 distinct FQNs (every callee is also a caller) and 4 edges.
+    assert after_stats["functions"] == 5
+    assert after_stats["function_edges"] == 4
+
+    # Cleanup for subsequent tests (fixture owns _INDEX_PATH; leaving a modified
+    # file behind is fine since reset_server_state rebuilds the fixture).
+    _ = srv  # silence unused import
+
+
+# --- dependency-set invariant (durable replacement for the wall-clock budget) ---
+
+def test_no_heavy_deps_on_serve_path():
+    """`import pyscope_mcp.server` must not drag in mcp / anyio / httpx / pydantic etc."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import pyscope_mcp.server, sys, json; print(json.dumps(sorted(sys.modules)))",
+        ],
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, f"import failed: {result.stderr.decode()}"
+    loaded = set(json.loads(result.stdout.decode()))
+    banned = {"mcp", "anyio", "httpx", "pydantic", "jsonschema", "pydantic_settings"}
+    intersection = banned & loaded
+    assert not intersection, (
+        f"Heavy deps loaded on serve path: {sorted(intersection)}. "
+        "Issue #40 removed these from the serve path — do not reintroduce."
     )
