@@ -169,13 +169,14 @@ class RpcServer:
             # recognisable; otherwise return newest.
             negotiated = self._NEWEST_VERSION
 
-        self._initialized = True
-        return {
+        result_dict = {
             "protocolVersion": negotiated,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": self._name, "version": self._version},
             **({"instructions": self._instructions} if self._instructions else {}),
         }
+        self._initialized = True
+        return result_dict
 
     async def _handle_noop(self, id: Any, params: dict | None) -> None:  # noqa: A002
         return None
