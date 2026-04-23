@@ -441,6 +441,16 @@ def classify_miss(
                 # Also handle direct module names: `import sys` → chain[0]=='sys' in STDLIB_MODULES
                 if chain[0] in STDLIB_MODULES and chain[0] not in import_table:
                     return "stdlib_method_call"
+                # Parameter injection pattern: def f(sys_module): sys_module.exit(...)
+                # Common in testable CLI code where the caller passes `sys` as an argument
+                # to allow tests to intercept exit(). Recognize <stdlib_name>_module and
+                # <stdlib_name>_lib naming conventions.
+                root = chain[0]
+                for suffix in ("_module", "_lib"):
+                    if root.endswith(suffix):
+                        stem = root[: -len(suffix)]
+                        if stem in STDLIB_MODULES:
+                            return "stdlib_method_call"
             method = chain[-1]
             if chain[0] != "self":
                 # ClassName.__new__(...) — inherited from object/type; never a
