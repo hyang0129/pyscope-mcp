@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 
 from pyscope_mcp import __version__
-from pyscope_mcp._rpc import INVALID_PARAMS, RpcError, RpcServer
+from pyscope_mcp._rpc import RpcError, RpcServer
 from pyscope_mcp.graph import CallGraphIndex
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,7 @@ def _get_index() -> CallGraphIndex:
     global _INDEX
     if _INDEX is None:
         if _INDEX_PATH is None:
-            raise RpcError(INVALID_PARAMS, "server started without an index path")
+            raise RuntimeError("server started without an index path")
         _INDEX = CallGraphIndex.load(_INDEX_PATH)
     return _INDEX
 
@@ -197,7 +197,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
 
     if name == "reload":
         if _INDEX_PATH is None:
-            raise RpcError(INVALID_PARAMS, "server started without an index path")
+            raise RuntimeError("server started without an index path")
         _INDEX = CallGraphIndex.load(_INDEX_PATH)
         return _text(_INDEX.stats())
 

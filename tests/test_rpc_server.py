@@ -684,8 +684,14 @@ async def test_handler_raises_rpc_error(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_no_index_path_returns_rpc_error(server: RpcServer):
-    """_INDEX_PATH=None → _get_index raises RpcError(INVALID_PARAMS) → JSON-RPC error."""
+async def test_no_index_path_returns_is_error_result(server: RpcServer):
+    """_INDEX_PATH=None → _get_index raises RuntimeError → isError:true result.
+
+    Issue #40: "Tool-level failures (unknown tool name, handler raised, bad index)
+    are not JSON-RPC errors — they are successful RPC responses whose
+    result.isError = true." RuntimeError from _get_index is caught by
+    _tools_call's except-Exception handler and surfaces as isError:true.
+    """
     import pyscope_mcp.server as srv
 
     srv._INDEX_PATH = None
@@ -693,13 +699,19 @@ async def test_no_index_path_returns_rpc_error(server: RpcServer):
     lines = [_req("tools/call", {"name": "stats", "arguments": {}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]
-    assert "error" in r
-    assert r["error"]["code"] == INVALID_PARAMS
+    assert "result" in r and "error" not in r
+    assert r["result"]["isError"] is True
+    assert "server started without an index path" in r["result"]["content"][0]["text"]
 
 
 @pytest.mark.asyncio
-async def test_no_index_path_on_reload_returns_rpc_error(server: RpcServer):
-    """_INDEX_PATH=None on reload → raises RpcError(INVALID_PARAMS) → JSON-RPC error."""
+async def test_no_index_path_on_reload_returns_is_error_result(server: RpcServer):
+    """_INDEX_PATH=None on reload → raises RuntimeError → isError:true result.
+
+    Issue #40: tool-level failures are successful RPC responses with isError=true,
+    not JSON-RPC errors. RuntimeError from the reload branch is caught by
+    _tools_call's except-Exception handler.
+    """
     import pyscope_mcp.server as srv
 
     srv._INDEX_PATH = None
@@ -707,9 +719,9 @@ async def test_no_index_path_on_reload_returns_rpc_error(server: RpcServer):
     lines = [_req("tools/call", {"name": "reload", "arguments": {}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]
-    assert "error" in r, "reload with no index path must surface as JSON-RPC error, not result.isError"
-    assert r["error"]["code"] == INVALID_PARAMS
-    assert "result" not in r
+    assert "result" in r and "error" not in r
+    assert r["result"]["isError"] is True
+    assert "server started without an index path" in r["result"]["content"][0]["text"]
 
 
 # --- tools/list behaviour --------------------------------------------------
