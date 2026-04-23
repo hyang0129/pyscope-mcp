@@ -147,7 +147,7 @@ def reset_server_state(tmp_index: Path):
     import pyscope_mcp.server as srv
     srv._INDEX_PATH = tmp_index
     srv._INDEX = None
-    srv._SERVER._initialized = False
+    srv._SERVER._initialized = True  # most tests are post-init; tests needing pre-init reset this explicitly
     srv._SERVER._shutdown_requested = False
     yield
     srv._INDEX = None
@@ -543,8 +543,11 @@ def test_no_print_in_rpc_module():
 # stdout hygiene — subprocess check
 # ---------------------------------------------------------------------------
 
-def test_stdout_hygiene_subprocess(tmp_index: Path, tmp_path: Path):
-    """Server stdout must contain only valid JSON-RPC frames even when handler logs."""
+def test_loop_writes_valid_json_frames(tmp_index: Path, tmp_path: Path):
+    """Verifies that _loop writes syntactically-valid JSON-RPC frames to the writer.
+
+    stdout-replacement hygiene is covered by e2e tests (test_rpc_stdio_e2e.py).
+    """
     import subprocess
 
     # Write a tiny driver script that feeds one message and captures stdout/stderr
@@ -698,6 +701,21 @@ async def test_no_index_path_returns_rpc_error(server: RpcServer):
     r = responses[0]
     assert "error" in r
     assert r["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.asyncio
+async def test_no_index_path_on_reload_returns_rpc_error(server: RpcServer):
+    """_INDEX_PATH=None on reload → raises RpcError(INVALID_PARAMS) → JSON-RPC error."""
+    import pyscope_mcp.server as srv
+
+    srv._INDEX_PATH = None
+    srv._INDEX = None
+    lines = [_req("tools/call", {"name": "reload", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]
+    assert "error" in r, "reload with no index path must surface as JSON-RPC error, not result.isError"
+    assert r["error"]["code"] == INVALID_PARAMS
+    assert "result" not in r
 
 
 # --- tools/list behaviour --------------------------------------------------

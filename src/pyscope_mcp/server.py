@@ -173,7 +173,11 @@ async def _tools_list(id, params):  # noqa: A002
 async def _tools_call(id, params):  # noqa: A002
     p = params or {}
     name = p.get("name")
-    arguments = p.get("arguments") or {}
+    arguments = p.get("arguments")
+    if arguments is not None and not isinstance(arguments, dict):
+        return _error_result("arguments must be an object")
+    if not arguments:
+        arguments = {}
 
     if not isinstance(name, str) or name not in _TOOL_NAMES:
         # Unknown tool name → isError:true in result, NOT a JSON-RPC error
@@ -193,7 +197,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
 
     if name == "reload":
         if _INDEX_PATH is None:
-            raise RuntimeError("server started without an index path")
+            raise RpcError(INVALID_PARAMS, "server started without an index path")
         _INDEX = CallGraphIndex.load(_INDEX_PATH)
         return _text(_INDEX.stats())
 

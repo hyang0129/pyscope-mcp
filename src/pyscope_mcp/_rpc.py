@@ -140,7 +140,7 @@ class RpcServer:
         # Register lifecycle methods
         self.method("initialize")(self._handle_initialize)
         self.method("notifications/initialized")(self._handle_noop)
-        self.method("notifications/cancelled")(self._handle_noop)
+        self.method("notifications/cancelled")(self._handle_noop)  # Ignored: v1 is serial-dispatch with no long-running tools to cancel. Future concurrency MUST revisit.
         self.method("ping")(self._handle_ping)
         self.method("shutdown")(self._handle_shutdown)
 
@@ -184,6 +184,8 @@ class RpcServer:
         return {}
 
     async def _handle_shutdown(self, id: Any, params: dict | None) -> dict:  # noqa: A002
+        # MCP shutdown is two-phase: this method prepares (sets flag for introspection);
+        # the client closes stdin, which causes _loop to exit on EOF.
         self._shutdown_requested = True
         return {}
 
@@ -200,6 +202,7 @@ class RpcServer:
 
         # Replace sys.stdout so accidental print() calls go to stderr.
         # The RPC writer uses _RAW_STDOUT directly.
+        _orig_stdout = sys.stdout
         _safe = io.TextIOWrapper(
             io.FileIO(sys.stderr.fileno(), mode="w", closefd=False),
             encoding="utf-8",
@@ -218,7 +221,7 @@ class RpcServer:
         # Async stdout writer (using the raw buffer captured at module import).
         # Must use FlowControlMixin (not BaseProtocol) — StreamWriter.drain()
         # calls protocol._drain_helper(), which only exists on FlowControlMixin.
-        from asyncio.streams import FlowControlMixin  # type: ignore[attr-defined]
+        from asyncio.streams import FlowControlMixin  # type: ignore[attr-defined]  # Private CPython symbol — no compat guarantee; tested in e2e against target Python version.
 
         write_transport, write_protocol = await loop.connect_write_pipe(
             lambda: FlowControlMixin(loop=loop), _RAW_STDOUT
@@ -231,10 +234,10 @@ class RpcServer:
             await self._loop(reader, writer)
         finally:
             try:
-                writer.write(b"")  # flush
                 await writer.drain()
             except Exception:
                 pass
+            sys.stdout = _orig_stdout
 
     async def _loop(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -297,6 +300,31 @@ class RpcServer:
                     continue
                 writer.write(_error_response(req_id, METHOD_NOT_FOUND))
                 await writer.drain()
+                continue
+
+            # Guard: params must be an object (dict) if present.
+            # Per JSON-RPC 2.0, params may be omitted, a dict, or an array;
+            # but MCP only uses named params (objects), so reject arrays here
+            # rather than letting individual handlers crash with AttributeError.
+            if params is not None and not isinstance(params, dict):
+                if req_id is not None:
+                    writer.write(
+                        _error_response(req_id, INVALID_PARAMS, "params must be an object")
+                    )
+                    await writer.drain()
+                continue
+
+            # Guard: MCP lifecycle — only allow initialize/ping/notifications
+            # before the client completes the handshake.  Other requests are
+            # rejected with -32002; notifications are silently dropped so we
+            # never send an error response to a one-way message.
+            _PRE_INIT_ALLOWED = {"initialize", "ping", "shutdown", "notifications/initialized", "notifications/cancelled"}
+            if not self._initialized and method not in _PRE_INIT_ALLOWED:
+                if req_id is not None:
+                    writer.write(
+                        _error_response(req_id, -32002, "server not initialized")
+                    )
+                    await writer.drain()
                 continue
 
             # Notifications: no response
