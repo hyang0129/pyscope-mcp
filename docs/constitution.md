@@ -30,7 +30,7 @@ that has to fall back to grep.
 ### 2. Minimal startup time once set up.
 
 MCP `serve` must open the index and be ready to answer within a human blink
-(<500 ms target, <2 s ceiling) on a pre-built index. Analysis is a separate,
+(<500 ms target, <5 s ceiling) on a pre-built index. Analysis is a separate,
 ahead-of-time step.
 
 - No lazy build on first query. If the index file is missing, `serve` errors out —
@@ -136,7 +136,7 @@ add surface area we can't maintain cheaply:
 
 When a PR adds a feature, ask in order:
 1. Does it keep law 1? (No uncertain edges leaking into query answers.)
-2. Does it keep law 2? (Server startup still <2 s.)
+2. Does it keep law 2? (Server startup still <5 s.)
 3. Does it keep laws 3 and 4? (Staleness still cheaply detectable by CI, graph still shippable with the PR.)
 4. Does it keep law 5? (Incremental build still ≤60 s on standard PRs.)
 
