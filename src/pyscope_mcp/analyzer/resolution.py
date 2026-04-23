@@ -364,6 +364,56 @@ def resolve_nested_def(
     return None
 
 
+# ---------------------------------------------------------------------------
+# cls() / cls.method() inside @classmethod resolution
+# ---------------------------------------------------------------------------
+
+def is_classmethod_context(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """True iff func_node is a @classmethod whose first positional arg is named 'cls'.
+
+    Both conditions must hold:
+    1. At least one decorator whose ``id`` or ``attr`` is ``'classmethod'``
+       (covers both bare ``@classmethod`` and attribute forms such as
+       ``@builtins.classmethod``).
+    2. First positional argument is literally named 'cls'.
+    """
+    if not func_node.args.args:
+        return False
+    if func_node.args.args[0].arg != "cls":
+        return False
+    for dec in func_node.decorator_list:
+        # bare: @classmethod
+        if isinstance(dec, ast.Name) and dec.id == "classmethod":
+            return True
+        # attribute: @builtins.classmethod or similar
+        if isinstance(dec, ast.Attribute) and dec.attr == "classmethod":
+            return True
+    return False
+
+
+def resolve_cls_call(
+    enclosing_class_fqn: str,
+    method: str | None,
+    ctx: "ResolveCtx",
+) -> str | None:
+    """Resolve ``cls(...)`` or ``cls.<method>(...)`` inside a classmethod.
+
+    - method is None: ``cls(...)`` → resolve to ``__init__`` of enclosing class
+      (direct hit or MRO walk).
+    - method is a string: ``cls.<method>(...)`` → resolve to
+      ``enclosing_class_fqn.<method>`` (direct hit or MRO walk).
+
+    Returns the resolved FQN or None.
+    """
+    target_method = method if method is not None else "__init__"
+    candidate = f"{enclosing_class_fqn}.{target_method}"
+    if candidate in ctx.known_fqns:
+        return candidate
+    return walk_mro(enclosing_class_fqn, target_method, ctx.class_bases, ctx.known_fqns)
+
+
 def resolve_call_result_method(
     node: ast.Attribute,
     ctx: ResolveCtx,

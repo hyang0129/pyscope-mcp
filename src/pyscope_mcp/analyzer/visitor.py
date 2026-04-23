@@ -19,7 +19,9 @@ from .resolution import (
     attr_chain,
     dispatcher_callable_arg,
     infer_call_class_type,
+    is_classmethod_context,
     is_dispatcher_call,
+    resolve_cls_call,
     resolve_local_var_method,
     resolve_nested_def,
     resolve_self_attr_method,
@@ -78,6 +80,7 @@ class EdgeVisitor(ast.NodeVisitor):
         self._file_path = file_path
         self._miss_log = miss_log
         self._scope_stack: list[str] = []
+        self._func_node_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         self.edges: dict[str, set[str]] = {}
 
     # ------------------------------------------------------------------
@@ -121,6 +124,10 @@ class EdgeVisitor(ast.NodeVisitor):
                 result.append(candidate)
         return result
 
+    def _enclosing_func_node(self) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        """Return the innermost enclosing function AST node, or None."""
+        return self._func_node_stack[-1] if self._func_node_stack else None
+
     def _enclosing_class_fqn(self) -> str | None:
         """FQN of the enclosing class, walking inside-out through the scope stack.
 
@@ -162,6 +169,12 @@ class EdgeVisitor(ast.NodeVisitor):
                 candidate = self._ctx.import_table[name]
                 if candidate in self._ctx.known_fqns:
                     return candidate
+            # cls(...) inside a @classmethod → resolve to enclosing class __init__.
+            if name == "cls":
+                enc_func = self._enclosing_func_node()
+                enc_class = self._enclosing_class_fqn()
+                if enc_func is not None and enc_class is not None and is_classmethod_context(enc_func):
+                    return resolve_cls_call(enc_class, None, self._ctx)
             # Nested-def lookup: check enclosing scopes before module-global.
             # Only attempt when we have a call_lineno (pass 2 call sites always
             # have one; dispatcher-arg resolution may not).
@@ -201,6 +214,13 @@ class EdgeVisitor(ast.NodeVisitor):
             chain = attr_chain(func_node)
             if chain is None:
                 return None
+
+            # cls.method(...) inside a @classmethod.
+            if chain[0] == "cls" and len(chain) == 2:
+                enc_func = self._enclosing_func_node()
+                enc_class = self._enclosing_class_fqn()
+                if enc_func is not None and enc_class is not None and is_classmethod_context(enc_func):
+                    return resolve_cls_call(enc_class, chain[1], self._ctx)
 
             # self.method(...) with MRO fallback for inherited methods.
             if chain[0] == "self" and len(chain) >= 2:
@@ -411,10 +431,17 @@ class EdgeVisitor(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._scope_stack.append(node.name)
+        self._func_node_stack.append(node)
         self.generic_visit(node)
+        self._func_node_stack.pop()
         self._scope_stack.pop()
 
-    visit_AsyncFunctionDef = visit_FunctionDef  # type: ignore[assignment]
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._scope_stack.append(node.name)
+        self._func_node_stack.append(node)
+        self.generic_visit(node)
+        self._func_node_stack.pop()
+        self._scope_stack.pop()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self._scope_stack.append(node.name)
