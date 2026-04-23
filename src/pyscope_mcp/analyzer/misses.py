@@ -56,7 +56,7 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
 PATHLIB_METHODS: frozenset[str] = frozenset({
     "exists", "mkdir", "read_text", "read_bytes", "write_text", "write_bytes",
     "stat", "relative_to", "glob", "iterdir", "resolve", "unlink",
-    "is_file", "is_dir", "parent", "with_suffix", "joinpath",
+    "is_file", "is_dir", "with_suffix", "joinpath",
     # additional pathlib.Path methods
     "with_name", "with_stem", "rename", "absolute", "touch", "rmdir", "chmod",
     "is_absolute", "is_relative_to", "samefile", "expanduser", "home", "cwd",
