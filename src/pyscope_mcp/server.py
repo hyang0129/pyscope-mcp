@@ -1,99 +1,197 @@
+"""pyscope-mcp MCP server — hand-rolled JSON-RPC 2.0 stdio transport.
+
+This module registers all tool handlers against the lightweight _rpc.RpcServer
+instead of the mcp SDK. The mcp SDK (and its transitive deps httpx, pydantic,
+anyio, jsonschema, pydantic_settings) are no longer required at serve time.
+
+Accepted trade-offs (one-way doors, see issue #40):
+* stdio transport only — no SSE / streamable HTTP.
+* No resources, prompts, sampling, elicitation, or roots MCP surface.
+* No auto-tracking of future MCP spec revisions.
+* No SDK in-process test client — we use a pipe harness in tests.
+
+Do NOT add print() calls to this module. stdout belongs to the RPC stream.
+All diagnostic output must go through logging (which is routed to stderr by
+_rpc.RpcServer.run() before any request is processed).
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json as _json
+import logging
 from pathlib import Path
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
-
+from pyscope_mcp import __version__
+from pyscope_mcp._rpc import INVALID_PARAMS, RpcError, RpcServer
 from pyscope_mcp.graph import CallGraphIndex
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Module-level state (process-wide singleton)
+# ---------------------------------------------------------------------------
 _INDEX: CallGraphIndex | None = None
 _INDEX_PATH: Path | None = None
 
-app: Server = Server("pyscope-mcp")
+# ---------------------------------------------------------------------------
+# Server instance
+# ---------------------------------------------------------------------------
+_SERVER = RpcServer(
+    name="pyscope-mcp",
+    version=__version__,
+    instructions=(
+        "Query the prebuilt Python call-graph index. "
+        "Use stats to check graph size, callers_of/callees_of for function-level "
+        "traversal, module_callers/module_callees for module-level traversal, "
+        "search for symbol lookup, and reload after rebuilding the index."
+    ),
+)
+
+# ---------------------------------------------------------------------------
+# Tool descriptor helpers
+# ---------------------------------------------------------------------------
+_TOOL_LIST = [
+    {
+        "name": "stats",
+        "description": "Return function/module node + edge counts for the loaded index.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "reload",
+        "description": "Re-read the index file from disk (use after running 'pyscope-mcp build').",
+        "inputSchema": {"type": "object", "properties": {}},
+        # reload reads disk; no side effects outside process state
+        "annotations": {"readOnlyHint": False, "idempotentHint": True},
+    },
+    {
+        "name": "callers_of",
+        "description": "List functions that (transitively, up to depth) call the given function.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fqn": {"type": "string", "description": "Fully-qualified name, e.g. pkg.mod.func"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+            },
+            "required": ["fqn"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "callees_of",
+        "description": "List functions (transitively, up to depth) called by the given function.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "fqn": {"type": "string", "description": "Fully-qualified name, e.g. pkg.mod.func"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+            },
+            "required": ["fqn"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "module_callers",
+        "description": "List modules that import/call into the given module.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module": {"type": "string"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+            },
+            "required": ["module"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "module_callees",
+        "description": "List modules that the given module imports/calls into.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "module": {"type": "string"},
+                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+            },
+            "required": ["module"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "search",
+        "description": "Substring search over known fully-qualified function names.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 50},
+            },
+            "required": ["query"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+]
+
+_TOOL_NAMES = {t["name"] for t in _TOOL_LIST}
 
 
+# ---------------------------------------------------------------------------
+# Index accessor
+# ---------------------------------------------------------------------------
 def _get_index() -> CallGraphIndex:
     global _INDEX
     if _INDEX is None:
         if _INDEX_PATH is None:
-            raise RuntimeError("server started without an index path")
+            raise RpcError(INVALID_PARAMS, "server started without an index path")
         _INDEX = CallGraphIndex.load(_INDEX_PATH)
     return _INDEX
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
-    depth = {"type": "integer", "minimum": 1, "maximum": 10, "default": 1}
-    fqn = {"type": "string", "description": "Fully-qualified name, e.g. pkg.mod.func"}
-    return [
-        Tool(
-            name="stats",
-            description="Return function/module node + edge counts for the loaded index.",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="reload",
-            description="Re-read the index file from disk (use after running 'pyscope-mcp build').",
-            inputSchema={"type": "object", "properties": {}},
-        ),
-        Tool(
-            name="callers_of",
-            description="List functions that (transitively, up to depth) call the given function.",
-            inputSchema={
-                "type": "object",
-                "properties": {"fqn": fqn, "depth": depth},
-                "required": ["fqn"],
-            },
-        ),
-        Tool(
-            name="callees_of",
-            description="List functions (transitively, up to depth) called by the given function.",
-            inputSchema={
-                "type": "object",
-                "properties": {"fqn": fqn, "depth": depth},
-                "required": ["fqn"],
-            },
-        ),
-        Tool(
-            name="module_callers",
-            description="List modules that import/call into the given module.",
-            inputSchema={
-                "type": "object",
-                "properties": {"module": {"type": "string"}, "depth": depth},
-                "required": ["module"],
-            },
-        ),
-        Tool(
-            name="module_callees",
-            description="List modules that the given module imports/calls into.",
-            inputSchema={
-                "type": "object",
-                "properties": {"module": {"type": "string"}, "depth": depth},
-                "required": ["module"],
-            },
-        ),
-        Tool(
-            name="search",
-            description="Substring search over known fully-qualified function names.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "default": 50},
-                },
-                "required": ["query"],
-            },
-        ),
-    ]
+def _text(payload: object) -> dict:
+    """Wrap a JSON-serialisable payload in MCP tool-result shape."""
+    return {"content": [{"type": "text", "text": _json.dumps(payload, indent=2)}], "isError": False}
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[TextContent]:
+def _error_result(message: str) -> dict:
+    """Tool-level failure (not a JSON-RPC error) — isError=true."""
+    return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
+# ---------------------------------------------------------------------------
+# tools/list
+# ---------------------------------------------------------------------------
+@_SERVER.method("tools/list")
+async def _tools_list(id, params):  # noqa: A002
+    # cursor / pagination not supported; never return nextCursor
+    return {"tools": _TOOL_LIST}
+
+
+# ---------------------------------------------------------------------------
+# tools/call
+# ---------------------------------------------------------------------------
+@_SERVER.method("tools/call")
+async def _tools_call(id, params):  # noqa: A002
     global _INDEX
+    p = params or {}
+    name = p.get("name")
+    arguments = p.get("arguments") or {}
+
+    if not isinstance(name, str) or name not in _TOOL_NAMES:
+        # Unknown tool name → isError:true in result, NOT a JSON-RPC error
+        return _error_result(f"unknown tool: {name!r}")
+
+    try:
+        return await _dispatch_tool(name, arguments)
+    except RpcError:
+        raise  # propagate JSON-RPC level errors (e.g. missing index path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Tool %r raised: %s", name, exc)
+        return _error_result(str(exc))
+
+
+async def _dispatch_tool(name: str, arguments: dict) -> dict:
+    global _INDEX
+
     if name == "reload":
         if _INDEX_PATH is None:
             raise RuntimeError("server started without an index path")
@@ -101,32 +199,50 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         return _text(_INDEX.stats())
 
     idx = _get_index()
+
     if name == "stats":
         return _text(idx.stats())
+
     if name == "callers_of":
-        return _text(idx.callers_of(arguments["fqn"], int(arguments.get("depth", 1))))
+        fqn = arguments.get("fqn")
+        if not fqn:
+            return _error_result("callers_of requires 'fqn'")
+        return _text(idx.callers_of(fqn, int(arguments.get("depth", 1))))
+
     if name == "callees_of":
-        return _text(idx.callees_of(arguments["fqn"], int(arguments.get("depth", 1))))
+        fqn = arguments.get("fqn")
+        if not fqn:
+            return _error_result("callees_of requires 'fqn'")
+        return _text(idx.callees_of(fqn, int(arguments.get("depth", 1))))
+
     if name == "module_callers":
-        return _text(idx.module_callers(arguments["module"], int(arguments.get("depth", 1))))
+        module = arguments.get("module")
+        if not module:
+            return _error_result("module_callers requires 'module'")
+        return _text(idx.module_callers(module, int(arguments.get("depth", 1))))
+
     if name == "module_callees":
-        return _text(idx.module_callees(arguments["module"], int(arguments.get("depth", 1))))
+        module = arguments.get("module")
+        if not module:
+            return _error_result("module_callees requires 'module'")
+        return _text(idx.module_callees(module, int(arguments.get("depth", 1))))
+
     if name == "search":
-        return _text(idx.search(arguments["query"], int(arguments.get("limit", 50))))
-    raise ValueError(f"unknown tool: {name}")
+        query = arguments.get("query")
+        if query is None:
+            return _error_result("search requires 'query'")
+        return _text(idx.search(query, int(arguments.get("limit", 50))))
+
+    # Should never reach here — guarded by _TOOL_NAMES check above
+    return _error_result(f"unknown tool: {name!r}")
 
 
-def _text(payload) -> list[TextContent]:
-    return [TextContent(type="text", text=_json.dumps(payload, indent=2))]
-
-
-async def _run() -> None:
-    async with stdio_server() as (read, write):
-        await app.run(read, write, app.create_initialization_options())
-
-
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 def run_stdio(index_path: Path) -> None:
+    """Load the index and start the JSON-RPC stdio loop (blocks until EOF/shutdown)."""
     global _INDEX_PATH, _INDEX
     _INDEX_PATH = Path(index_path)
     _INDEX = CallGraphIndex.load(_INDEX_PATH)
-    asyncio.run(_run())
+    asyncio.run(_SERVER.run())
