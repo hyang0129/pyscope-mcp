@@ -52,7 +52,7 @@ When adding a new MCP tool that needs graph data, assume the index is already lo
 
 ## Layout
 
-- `src/pyscope_mcp/graph.py` — `CallGraphIndex`: wraps raw dict in NetworkX digraphs, implements queries, save/load.
+- `src/pyscope_mcp/graph.py` — `CallGraphIndex`: wraps raw dict in `_DiGraph` (inline plain-dict adjacency list), implements queries, save/load.
 - `src/pyscope_mcp/analyzer.py` — **stub**. Implement `build_raw` here.
 - `src/pyscope_mcp/cli.py` — argparse entry point with `build` and `serve` subcommands.
 - `src/pyscope_mcp/server.py` — MCP stdio server.
@@ -79,7 +79,7 @@ Conventions when adding tools:
 
 - Python 3.10+ at minimum. The analyzer must run on 3.11+ cleanly.
 - Use `from __future__ import annotations`.
-- Dependencies stay minimal: `mcp`, `networkx`, `pydantic`. Do not add heavy deps without a reason — especially do not pull in unmaintained analysis libraries. (No pickle caches, no regex "parsers," no LSIF.)
+- Dependencies stay minimal: `mcp`, `pydantic`. Do not add heavy deps without a reason — especially do not pull in unmaintained analysis libraries. (No pickle caches, no regex "parsers," no LSIF.) `networkx` was removed in #37 — graph.py uses a minimal inline `_DiGraph` backed by plain dicts.
 - Index file format is versioned (`{"version": 1, "root": ..., "raw": {...}}`). Bump the version if the schema changes and handle old versions in `CallGraphIndex.load`.
 - `reload` is the only way the running server picks up a new index — no filesystem watching.
 - JSON on disk is fine while indexes are small and human-inspectable. If we outgrow it, move to SQLite + FTS5 before anything more exotic. SCIP export is a later option for Sourcegraph interop; not a v1 concern.

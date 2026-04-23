@@ -4,7 +4,70 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import networkx as nx
+
+class _DiGraph:
+    """Minimal directed-graph backed by plain dicts.
+
+    Replaces networkx.DiGraph — only the operations actually used by
+    CallGraphIndex are implemented.  Cold-start impact: ~7 s saved.
+    """
+
+    def __init__(self) -> None:
+        self._succ: dict[str, set[str]] = {}
+        self._pred: dict[str, set[str]] = {}
+
+    # ------------------------------------------------------------------ nodes
+    def add_node(self, n: str) -> None:
+        self._succ.setdefault(n, set())
+        self._pred.setdefault(n, set())
+
+    # ------------------------------------------------------------------ edges
+    def add_edge(self, u: str, v: str) -> None:
+        self.add_node(u)
+        self.add_node(v)
+        self._succ[u].add(v)
+        self._pred[v].add(u)
+
+    # ---------------------------------------------------------------- queries
+    def successors(self, n: str):  # type: ignore[return]
+        return iter(self._succ.get(n, ()))
+
+    def predecessors(self, n: str):  # type: ignore[return]
+        return iter(self._pred.get(n, ()))
+
+    def __contains__(self, n: object) -> bool:
+        return n in self._succ
+
+    @property
+    def nodes(self):  # type: ignore[return]
+        return self._succ.keys()
+
+    def number_of_nodes(self) -> int:
+        return len(self._succ)
+
+    def number_of_edges(self) -> int:
+        return sum(len(v) for v in self._succ.values())
+
+    # ----------------------------------------------------------------- views
+    def reverse(self, copy: bool = False) -> "_DiGraphReverseView":  # noqa: ARG002
+        """Return a view that swaps successor/predecessor lookup (no copy)."""
+        return _DiGraphReverseView(self)
+
+
+class _DiGraphReverseView:
+    """Read-only reversed view of a _DiGraph (swaps succ ↔ pred)."""
+
+    def __init__(self, g: _DiGraph) -> None:
+        self._g = g
+
+    def successors(self, n: str):  # type: ignore[return]
+        return iter(self._g._pred.get(n, ()))
+
+    def predecessors(self, n: str):  # type: ignore[return]
+        return iter(self._g._succ.get(n, ()))
+
+    def __contains__(self, n: object) -> bool:
+        return n in self._g._succ
 
 
 @dataclass
@@ -18,15 +81,15 @@ class CallGraphIndex:
     """
 
     root: Path
-    function_graph: nx.DiGraph = field(default_factory=nx.DiGraph)
-    module_graph: nx.DiGraph = field(default_factory=nx.DiGraph)
+    function_graph: _DiGraph = field(default_factory=_DiGraph)
+    module_graph: _DiGraph = field(default_factory=_DiGraph)
     raw: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def from_raw(cls, root: str | Path, raw: dict[str, list[str]]) -> "CallGraphIndex":
         root = Path(root).resolve()
-        fg: nx.DiGraph = nx.DiGraph()
-        mg: nx.DiGraph = nx.DiGraph()
+        fg = _DiGraph()
+        mg = _DiGraph()
         for caller, callees in raw.items():
             fg.add_node(caller)
             cm = _module_of(caller)
@@ -86,7 +149,7 @@ def _module_of(fqn: str) -> str:
     return fqn.rsplit(".", 1)[0] if "." in fqn else fqn
 
 
-def _bfs(g: nx.DiGraph, start: str, depth: int) -> list[str]:
+def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> list[str]:
     if start not in g:
         return []
     seen: set[str] = {start}

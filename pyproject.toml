@@ -23,7 +23,6 @@ classifiers = [
 ]
 dependencies = [
     "mcp>=1.2.0",
-    "networkx>=3.2",
     "pydantic>=2.6",
 ]
 
