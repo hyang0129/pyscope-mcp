@@ -12,10 +12,17 @@ from .resolution import attr_chain
 _EXEMPLAR_CAP = 50
 
 # Python builtin callable names that are safe to accept without resolution.
-# super/getattr have dedicated tags; exec/eval/compile have exec_or_eval.
+# exec/eval/compile are intentionally excluded (exec_or_eval bucket — users
+# want those visible).  Names starting with "_" (including __import__) are
+# already filtered out by the startswith("_") guard above.
+# getattr and super were previously excluded because they had "dedicated tags",
+# but those tags only apply when getattr/super is the *inner* function of a
+# nested Call node (e.g. getattr(...)() or super().__init__()).  A bare call
+# like getattr(obj, 'x') or super() has func=Name(id='getattr'/'super') and
+# must be accepted here instead of leaking to bare_name_unresolved.
 BUILTIN_FUNCTION_NAMES: frozenset[str] = (
     frozenset(n for n in dir(builtins) if not n.startswith("_"))
-    - {"exec", "eval", "compile", "super", "getattr"}
+    - {"exec", "eval", "compile"}
 )
 
 # Canonical method names for built-in container / string types.
@@ -43,6 +50,8 @@ BUILTIN_COLLECTION_METHODS: frozenset[str] = frozenset({
     "decode", "from_bytes", "to_bytes",
     "zfill", "center", "ljust", "rjust", "expandtabs", "swapcase",
     "partition", "rpartition", "translate", "maketrans",
+    # str — Python 3.9+ additions (removesuffix / removeprefix)
+    "removesuffix", "removeprefix",
 })
 
 # Heuristic: method-name-only whitelists for stable external libraries.
