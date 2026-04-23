@@ -147,7 +147,6 @@ def reset_server_state(tmp_index: Path):
     import pyscope_mcp.server as srv
     srv._INDEX_PATH = tmp_index
     srv._INDEX = None
-    srv._SERVER._initialized = True  # most tests are post-init; tests needing pre-init reset this explicitly
     srv._SERVER._shutdown_requested = False
     yield
     srv._INDEX = None
@@ -439,7 +438,6 @@ async def test_shutdown(server: RpcServer):
 async def test_initialize_known_version(server: RpcServer):
     """Known versions are echoed back."""
     for version in ("2024-11-05", "2025-03-26", "2025-06-18"):
-        server._initialized = False
         lines = [_req("initialize", {"protocolVersion": version}, req_id=1)]
         responses = await _run(server, lines)
         assert responses[0]["result"]["protocolVersion"] == version
@@ -456,7 +454,6 @@ async def test_initialize_unknown_version_fallback(server: RpcServer):
     down to the newest known version rather than erroring. This test pins
     that behaviour so the drift cannot reappear silently.
     """
-    server._initialized = False
     lines = [_req("initialize", {"protocolVersion": "2099-01-01"}, req_id=1)]
     responses = await _run(server, lines)
     assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
@@ -639,7 +636,6 @@ def test_cold_import_budget():
 @pytest.mark.asyncio
 async def test_initialize_missing_protocol_version(server: RpcServer):
     """Omitting protocolVersion hits the `p.get(..., _NEWEST_VERSION)` default."""
-    server._initialized = False
     lines = [_req("initialize", {"clientInfo": {"name": "t"}}, req_id=1)]
     responses = await _run(server, lines)
     assert responses[0]["result"]["protocolVersion"] == "2025-06-18"
@@ -648,7 +644,6 @@ async def test_initialize_missing_protocol_version(server: RpcServer):
 @pytest.mark.asyncio
 async def test_initialize_no_params(server: RpcServer):
     """No `params` key at all — exercises the `params or {}` branch."""
-    server._initialized = False
     lines = [_req("initialize", req_id=1)]
     responses = await _run(server, lines)
     assert "result" in responses[0]
@@ -658,7 +653,6 @@ async def test_initialize_no_params(server: RpcServer):
 @pytest.mark.asyncio
 async def test_initialize_response_shape(server: RpcServer):
     """serverInfo.version matches pyscope_mcp.__version__; instructions present."""
-    server._initialized = False
     lines = [_req("initialize", {"protocolVersion": "2025-06-18"}, req_id=1)]
     responses = await _run(server, lines)
     result = responses[0]["result"]

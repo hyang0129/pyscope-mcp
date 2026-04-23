@@ -134,7 +134,6 @@ class RpcServer:
         self._version = version
         self._instructions = instructions
         self._handlers: dict[str, Handler] = {}
-        self._initialized = False
         self._shutdown_requested = False
 
         # Register lifecycle methods
@@ -175,7 +174,6 @@ class RpcServer:
             "serverInfo": {"name": self._name, "version": self._version},
             **({"instructions": self._instructions} if self._instructions else {}),
         }
-        self._initialized = True
         return result_dict
 
     async def _handle_noop(self, id: Any, params: dict | None) -> None:  # noqa: A002
@@ -301,31 +299,6 @@ class RpcServer:
                     continue
                 writer.write(_error_response(req_id, METHOD_NOT_FOUND))
                 await writer.drain()
-                continue
-
-            # Guard: params must be an object (dict) if present.
-            # Per JSON-RPC 2.0, params may be omitted, a dict, or an array;
-            # but MCP only uses named params (objects), so reject arrays here
-            # rather than letting individual handlers crash with AttributeError.
-            if params is not None and not isinstance(params, dict):
-                if req_id is not None:
-                    writer.write(
-                        _error_response(req_id, INVALID_PARAMS, "params must be an object")
-                    )
-                    await writer.drain()
-                continue
-
-            # Guard: MCP lifecycle — only allow initialize/ping/notifications
-            # before the client completes the handshake.  Other requests are
-            # rejected with -32002; notifications are silently dropped so we
-            # never send an error response to a one-way message.
-            _PRE_INIT_ALLOWED = {"initialize", "ping", "shutdown", "notifications/initialized", "notifications/cancelled"}
-            if not self._initialized and method not in _PRE_INIT_ALLOWED:
-                if req_id is not None:
-                    writer.write(
-                        _error_response(req_id, -32002, "server not initialized")
-                    )
-                    await writer.drain()
                 continue
 
             # Notifications: no response
