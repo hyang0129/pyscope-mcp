@@ -19,6 +19,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import sys
@@ -56,7 +57,6 @@ _ERROR_MESSAGES: dict[int, str] = {
 
 # Capture original stdout buffer *before* any sys.stdout replacement.
 # This reference is the only path that writes to the protocol stream.
-_STDOUT_BUF: "asyncio.StreamWriter | None" = None  # set in run()
 _RAW_STDOUT = sys.stdout.buffer
 
 
@@ -200,8 +200,6 @@ class RpcServer:
 
         # Replace sys.stdout so accidental print() calls go to stderr.
         # The RPC writer uses _RAW_STDOUT directly.
-        import io
-
         _safe = io.TextIOWrapper(
             io.FileIO(sys.stderr.fileno(), mode="w", closefd=False),
             encoding="utf-8",
@@ -210,7 +208,7 @@ class RpcServer:
         )
         sys.stdout = _safe
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Async stdin reader
         reader = asyncio.StreamReader()
@@ -321,10 +319,8 @@ class RpcServer:
                 writer.write(_response(req_id, result))
                 await writer.drain()
 
-            # After shutdown + exit notification, stop the loop
-            if self._shutdown_requested and method == "shutdown":
-                # Wait for the exit notification (best-effort) but don't block
-                pass
-
-        # EOF — clean exit
+        # EOF — clean exit.
+        # Termination contract: the loop relies on the client closing stdin (EOF)
+        # as the actual termination signal. Well-behaved MCP clients close the pipe
+        # after sending the `exit` notification that follows `shutdown`.
         logger.debug("stdin EOF — RPC loop exiting cleanly")
