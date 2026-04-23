@@ -172,6 +172,8 @@ class ResolveCtx:
     local_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
     # {func_fqn: {var_name: external_factory_fqn}} — populated by collect_external_local_var_types
     external_local_types: dict[str, dict[str, str]] = None  # type: ignore[assignment]
+    # {enclosing_fqn: {name: (nested_fqn, def_lineno)}} — populated by collect_nested_defs
+    nested_defs: dict[str, dict[str, tuple[str, int]]] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         # Default to empty set/dict so callers that don't supply it still work.
@@ -183,6 +185,8 @@ class ResolveCtx:
             object.__setattr__(self, "local_types", {})
         if self.external_local_types is None:
             object.__setattr__(self, "external_local_types", {})
+        if self.nested_defs is None:
+            object.__setattr__(self, "nested_defs", {})
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +319,49 @@ def resolve_local_var_method(
     if candidate in ctx.known_fqns:
         return candidate
     return walk_mro(class_fqn, method, ctx.class_bases, ctx.known_fqns)
+
+
+def resolve_nested_def(
+    name: str,
+    call_lineno: int,
+    scope_stack_fqns: list[str],
+    ctx: ResolveCtx,
+) -> str | None:
+    """Resolve a bare-name call to a nested function defined in an enclosing scope.
+
+    Walks outward through ``scope_stack_fqns`` (innermost first) looking for
+    a nested def named ``name`` visible at ``call_lineno``.
+
+    Visibility rules:
+    - The nested def must be defined in the same enclosing scope or any outer
+      scope (sibling-scope isolation: defs in other sibling scopes are NOT
+      visible).
+    - Forward-reference guard: the nested def's ``def_lineno`` must be
+      strictly less than ``call_lineno`` (Python's name-binding rule — the
+      name is not bound before the ``def`` statement executes).
+    - A module-global name (i.e. from ``known_fqns``) that happens to match
+      ``name`` is ONLY returned if no nested def was found first.  This
+      function does not perform the module-global lookup — the caller does
+      that as the final fallback after this resolver returns ``None``.
+
+    Returns the nested FQN (e.g. ``pkg.mod.outer._table``) or
+    ``None`` if no matching nested def is visible.
+    """
+    if not ctx.nested_defs:
+        return None
+    for enclosing_fqn in scope_stack_fqns:
+        scope_nested = ctx.nested_defs.get(enclosing_fqn)
+        if scope_nested is None:
+            continue
+        entry = scope_nested.get(name)
+        if entry is None:
+            continue
+        nested_fqn, def_lineno = entry
+        # Forward-reference guard: def must precede the call site.
+        if def_lineno >= call_lineno:
+            continue
+        return nested_fqn
+    return None
 
 
 def resolve_call_result_method(

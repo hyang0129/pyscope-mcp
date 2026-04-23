@@ -21,6 +21,7 @@ from .resolution import (
     infer_call_class_type,
     is_dispatcher_call,
     resolve_local_var_method,
+    resolve_nested_def,
     resolve_self_attr_method,
     walk_mro,
 )
@@ -61,6 +62,7 @@ class EdgeVisitor(ast.NodeVisitor):
         self_attr_types: dict[str, dict[str, str]] | None = None,
         local_types: dict[str, dict[str, str]] | None = None,
         external_local_types: dict[str, dict[str, str]] | None = None,
+        nested_defs: dict[str, dict[str, tuple[str, int]]] | None = None,
     ) -> None:
         self._ctx = ResolveCtx(
             module_fqn=module_fqn,
@@ -71,6 +73,7 @@ class EdgeVisitor(ast.NodeVisitor):
             self_attr_types=self_attr_types or {},
             local_types=local_types or {},
             external_local_types=external_local_types or {},
+            nested_defs=nested_defs or {},
         )
         self._file_path = file_path
         self._miss_log = miss_log
@@ -105,6 +108,19 @@ class EdgeVisitor(ast.NodeVisitor):
                 return candidate
         return None
 
+    def _enclosing_func_fqns(self) -> list[str]:
+        """Return a list of all enclosing function-scope FQNs, innermost first.
+
+        Used by ``resolve_nested_def`` to walk outward through nested scopes.
+        Class scopes are excluded (same logic as ``_current_func_fqn``).
+        """
+        result: list[str] = []
+        for i in range(len(self._scope_stack) - 1, -1, -1):
+            candidate = f"{self._ctx.module_fqn}.{'.'.join(self._scope_stack[:i + 1])}"
+            if candidate not in self._ctx.known_classes:
+                result.append(candidate)
+        return result
+
     def _enclosing_class_fqn(self) -> str | None:
         """FQN of the enclosing class, walking inside-out through the scope stack.
 
@@ -126,9 +142,13 @@ class EdgeVisitor(ast.NodeVisitor):
     # Resolvers
     # ------------------------------------------------------------------
 
-    def _resolve_expr(self, func_node: ast.expr) -> str | None:
+    def _resolve_expr(self, func_node: ast.expr, call_lineno: int = 0) -> str | None:
         """Resolve any callable-reference expression (a Call.func, or a
         callable-argument to a dispatcher) to an in-package FQN or None.
+
+        ``call_lineno`` is the source line of the call site; used by the
+        nested-def resolver to enforce forward-reference rules.  Pass 0
+        when the line is unknown (nested-def check is then skipped).
         """
         # super().method(...) — Attribute whose value is Call(super).
         if isinstance(func_node, ast.Attribute) and isinstance(func_node.value, ast.Call):
@@ -142,6 +162,14 @@ class EdgeVisitor(ast.NodeVisitor):
                 candidate = self._ctx.import_table[name]
                 if candidate in self._ctx.known_fqns:
                     return candidate
+            # Nested-def lookup: check enclosing scopes before module-global.
+            # Only attempt when we have a call_lineno (pass 2 call sites always
+            # have one; dispatcher-arg resolution may not).
+            if call_lineno > 0 and self._ctx.nested_defs:
+                scope_fqns = self._enclosing_func_fqns()
+                nested = resolve_nested_def(name, call_lineno, scope_fqns, self._ctx)
+                if nested is not None:
+                    return nested
             candidate = f"{self._ctx.module_fqn}.{name}"
             if candidate in self._ctx.known_fqns:
                 return candidate
@@ -369,7 +397,9 @@ class EdgeVisitor(ast.NodeVisitor):
             return False
         if not isinstance(arg, (ast.Name, ast.Attribute)):
             return False
-        resolved = self._resolve_expr(arg)
+        # Pass the dispatcher call's lineno so nested-def resolution can apply
+        # its forward-reference guard (the callable arg is referenced at this line).
+        resolved = self._resolve_expr(arg, call_lineno=call.lineno)
         if resolved is None:
             return False
         self._emit(resolved)
@@ -392,7 +422,7 @@ class EdgeVisitor(ast.NodeVisitor):
         self._scope_stack.pop()
 
     def visit_Call(self, node: ast.Call) -> None:
-        callee = self._resolve_expr(node.func)
+        callee = self._resolve_expr(node.func, call_lineno=node.lineno)
         if callee is not None:
             self._emit(callee)
             if self._miss_log is not None:

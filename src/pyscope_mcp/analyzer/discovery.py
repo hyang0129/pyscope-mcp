@@ -101,6 +101,98 @@ def discover_modules(root: Path, package: str) -> dict[str, Path]:
     return result
 
 
+def collect_nested_defs(
+    tree: ast.Module,
+    module_fqn: str,
+) -> dict[str, dict[str, tuple[str, int]]]:
+    """Collect nested-function definitions for bare-name resolution.
+
+    Returns a two-level map::
+
+        {enclosing_fqn: {nested_name: (nested_fqn, def_lineno)}}
+
+    where ``enclosing_fqn`` is the FQN of the *direct* enclosing function (or
+    method), using the same plain-dot convention as the visitor's scope stack::
+
+        pkg.mod.outer            → {_table: (pkg.mod.outer._table, lineno)}
+        pkg.mod.MyClass.method   → {_helper: (pkg.mod.MyClass.method._helper, lineno)}
+
+    The ``def_lineno`` is the first line of the nested ``def`` statement.  It
+    is used by the resolver to enforce Python's name-binding rule: a nested
+    function is not in scope before its ``def`` statement executes.
+
+    Only nested *functions* are recorded (not nested classes — see issue #28
+    out-of-scope note).  Each function is recorded under its direct enclosing
+    function's FQN; the resolver walks outward through the scope chain if the
+    calling site is itself a nested function.
+    """
+    result: dict[str, dict[str, tuple[str, int]]] = {}
+    # Walk module-level statements, descending into class and function bodies.
+    _collect_nested_defs_toplevel(tree.body, module_fqn, result)
+    return result
+
+
+def _collect_nested_defs_toplevel(
+    stmts: list[ast.stmt],
+    scope_fqn: str,
+    result: dict[str, dict[str, tuple[str, int]]],
+) -> None:
+    """Walk statements at module or class level, entering function bodies."""
+    for stmt in stmts:
+        if isinstance(stmt, ast.ClassDef):
+            class_fqn = f"{scope_fqn}.{stmt.name}"
+            # Descend into class body; methods inside are function scopes
+            _collect_nested_defs_toplevel(stmt.body, class_fqn, result)
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func_fqn = f"{scope_fqn}.{stmt.name}"
+            # Scan this function's body for nested defs
+            _collect_nested_defs_in_func(stmt.body, func_fqn, result)
+
+
+def _collect_nested_defs_in_func(
+    stmts: list[ast.stmt],
+    enclosing_fqn: str,
+    result: dict[str, dict[str, tuple[str, int]]],
+) -> None:
+    """Scan a function body for nested FunctionDefs, recording them under enclosing_fqn.
+
+    Uses the same plain-dot FQN convention as the visitor's scope stack (no
+    ``<locals>`` segment).  This keeps nested_defs keys consistent with what
+    ``_enclosing_func_fqns`` produces in the visitor.
+
+    Descends into if/for/while/with/try bodies (where a def can appear), but
+    does NOT descend into nested function bodies — those are separate scopes.
+    """
+    for stmt in stmts:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            nested_fqn = f"{enclosing_fqn}.{stmt.name}"
+            # Record: bare name → (nested_fqn, def_lineno)
+            entries = result.setdefault(enclosing_fqn, {})
+            entries[stmt.name] = (nested_fqn, stmt.lineno)
+            # Recurse into nested function body as a new scope
+            _collect_nested_defs_in_func(stmt.body, nested_fqn, result)
+
+        elif isinstance(stmt, ast.ClassDef):
+            # Nested class inside a function — out of scope for issue #28.
+            # Recurse into its methods so their nested defs are found.
+            class_fqn = f"{enclosing_fqn}.{stmt.name}"
+            _collect_nested_defs_toplevel(stmt.body, class_fqn, result)
+
+        elif isinstance(stmt, ast.If):
+            _collect_nested_defs_in_func(stmt.body + stmt.orelse, enclosing_fqn, result)
+        elif isinstance(stmt, ast.For):
+            _collect_nested_defs_in_func(stmt.body + stmt.orelse, enclosing_fqn, result)
+        elif isinstance(stmt, ast.While):
+            _collect_nested_defs_in_func(stmt.body + stmt.orelse, enclosing_fqn, result)
+        elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+            _collect_nested_defs_in_func(stmt.body, enclosing_fqn, result)
+        elif isinstance(stmt, ast.Try):
+            all_stmts = stmt.body + stmt.orelse + stmt.finalbody
+            for handler in stmt.handlers:
+                all_stmts += handler.body
+            _collect_nested_defs_in_func(all_stmts, enclosing_fqn, result)
+
+
 def collect_defs(tree: ast.Module, module_fqn: str) -> set[str]:
     """Collect top-level defs and one-level-deep methods from a parsed AST."""
     defs: set[str] = set()
