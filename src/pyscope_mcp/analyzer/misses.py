@@ -441,6 +441,14 @@ def classify_miss(
                     return "stdlib_method_call"
             method = chain[-1]
             if chain[0] != "self":
+                # ClassName.__new__(...) — inherited from object/type; never a
+                # user-defined in-package method worth tracking.  Accept as a
+                # known builtin-method call so it doesn't pollute the miss log.
+                # Note: if the receiver resolved to an in-package class, the
+                # visitor's _resolve_expr already returned it via
+                # infer_call_class_type and this branch is never reached.
+                if method == "__new__":
+                    return "builtin_method_call"
                 # Chain-root special case: known logger variable names
                 if chain[0] in {"logger", "log", "logging"}:
                     return "loguru_method_call"

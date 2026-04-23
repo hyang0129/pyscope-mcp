@@ -592,10 +592,49 @@ def _infer_constructor_class(
     import_table: dict[str, str],
     known_classes: set[str],
 ) -> str | None:
-    """Infer class FQN if RHS is a constructor call to an in-package class."""
+    """Infer class FQN if RHS is a constructor call to an in-package class.
+
+    Handles two forms:
+    - ``ClassName(...)`` / ``pkg.ClassName(...)`` — direct constructor call.
+    - ``ClassName.__new__(ClassName)`` — bypass-__init__ constructor pattern.
+      The ``.__new__`` attr is stripped; the receiver expression is resolved
+      to a class FQN using the same longest-prefix import-table logic.
+    """
     if not isinstance(rhs, ast.Call):
         return None
     func = rhs.func
+
+    # ClassName.__new__(...) — treat as constructor for ClassName.
+    if (
+        isinstance(func, ast.Attribute)
+        and func.attr == "__new__"
+    ):
+        inner = func.value
+        if isinstance(inner, ast.Name):
+            name = inner.id
+            if name in import_table:
+                candidate = import_table[name]
+                if candidate in known_classes:
+                    return candidate
+            candidate = f"{module_fqn}.{name}"
+            if candidate in known_classes:
+                return candidate
+            return None
+        inner_chain = attr_chain(inner)
+        if inner_chain is not None:
+            for prefix_len in range(len(inner_chain) - 1, 0, -1):
+                prefix = ".".join(inner_chain[:prefix_len])
+                if prefix in import_table:
+                    base_fqn = import_table[prefix]
+                    remainder = inner_chain[prefix_len:]
+                    candidate = ".".join([base_fqn] + remainder)
+                    if candidate in known_classes:
+                        return candidate
+            dotted = ".".join(inner_chain)
+            if dotted in known_classes:
+                return dotted
+        return None
+
     if isinstance(func, ast.Name):
         name = func.id
         if name in import_table:
