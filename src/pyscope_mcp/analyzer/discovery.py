@@ -49,19 +49,11 @@ def _infer_sentinel_from_annotation(
         name = target.id
         if name in _BUILTIN_ANNOTATION_NAMES:
             return _BUILTIN_ANNOTATION_NAMES[name]
-        # Path — only if it resolves to pathlib.Path via import_table
-        if name == "Path":
-            resolved = import_table.get("Path")
-            if resolved in ("pathlib.Path",):
-                return "pathlib.Path"
-            # bare 'Path' with no import_table entry but commonly means pathlib.Path
-            if resolved is None:
-                # conservative: only if no other mapping for 'Path' exists
-                return "pathlib.Path"
-        # pathlib.Path annotation
-        if name in import_table:
-            if import_table[name] == "pathlib.Path":
-                return "pathlib.Path"
+        # Path — only if import_table explicitly maps it to pathlib.Path.
+        # Do NOT assume bare 'Path' without an explicit import; user code may
+        # define its own Path class.
+        if import_table.get(name) == "pathlib.Path":
+            return "pathlib.Path"
     return None
 
 
@@ -89,11 +81,8 @@ def _infer_sentinel_from_rhs(
             name = func.id
             if name in _BUILTIN_ANNOTATION_NAMES:
                 return _BUILTIN_ANNOTATION_NAMES[name]
-            if name == "Path":
-                resolved = import_table.get("Path")
-                if resolved in ("pathlib.Path",) or resolved is None:
-                    return "pathlib.Path"
-            if name in import_table and import_table[name] == "pathlib.Path":
+            # Path(...) — only if import_table explicitly maps it to pathlib.Path.
+            if import_table.get(name) == "pathlib.Path":
                 return "pathlib.Path"
     return None
 

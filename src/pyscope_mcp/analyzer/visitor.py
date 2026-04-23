@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 
-from .discovery import SENTINEL_BUILTIN_TYPES
 from .misses import (
     ACCEPTED_PATTERNS,
     BUILTIN_COLLECTION_METHODS,
@@ -289,29 +288,6 @@ class EdgeVisitor(ast.NodeVisitor):
             return accepted_tag
         return None
 
-    def _try_accept_local_var_sentinel(self, node: ast.Call) -> str | None:
-        """For ``var.<method>(...)`` calls where ``var`` is a local variable typed
-        as a sentinel (builtin or pathlib.Path), return the accepted-pattern tag if
-        the method is in the corresponding whitelist; otherwise return None.
-        """
-        func = node.func
-        if not isinstance(func, ast.Attribute):
-            return None
-        chain = attr_chain(func)
-        if chain is None or len(chain) != 2 or chain[0] == "self":
-            return None
-        var_name, method = chain[0], chain[1]
-        func_fqn = self._current_func_fqn()
-        if func_fqn is None:
-            return None
-        var_class = self._ctx.local_types.get(func_fqn, {}).get(var_name)
-        if var_class is None or var_class not in _SENTINEL_ACCEPTED:
-            return None
-        accepted_tag, valid_methods = _SENTINEL_ACCEPTED[var_class]
-        if method in valid_methods:
-            return accepted_tag
-        return None
-
     def _try_emit_dispatcher_edge(self, call: ast.Call) -> bool:
         """If `call` looks like `dispatcher(fn, ...)` where fn is an in-package
         callable reference, emit an extra edge to fn. Returns True iff we emitted.
@@ -360,13 +336,10 @@ class EdgeVisitor(ast.NodeVisitor):
                 if ext is not None:
                     self._miss_log.record_resolved(in_package=False)
                 else:
-                    # Check if this is a self-attr or local-var sentinel call before
-                    # falling through to classify_miss (which would tag it as
-                    # self_method_unresolved / attr_chain_unresolved).
-                    sentinel_tag = (
-                        self._try_accept_self_attr_sentinel(node)
-                        or self._try_accept_local_var_sentinel(node)
-                    )
+                    # Check if this is a self-attr sentinel call before falling
+                    # through to classify_miss (which would tag it as
+                    # self_method_unresolved).
+                    sentinel_tag = self._try_accept_self_attr_sentinel(node)
                     if sentinel_tag is not None:
                         self._miss_log.record_accepted(sentinel_tag, self._file_path)
                     else:
