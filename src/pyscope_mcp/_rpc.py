@@ -215,9 +215,13 @@ class RpcServer:
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
-        # Async stdout writer (using the raw buffer captured at module import)
+        # Async stdout writer (using the raw buffer captured at module import).
+        # Must use FlowControlMixin (not BaseProtocol) — StreamWriter.drain()
+        # calls protocol._drain_helper(), which only exists on FlowControlMixin.
+        from asyncio.streams import FlowControlMixin  # type: ignore[attr-defined]
+
         write_transport, write_protocol = await loop.connect_write_pipe(
-            asyncio.BaseProtocol, _RAW_STDOUT
+            lambda: FlowControlMixin(loop=loop), _RAW_STDOUT
         )
         writer = asyncio.StreamWriter(  # type: ignore[call-arg]
             write_transport, write_protocol, reader, loop
