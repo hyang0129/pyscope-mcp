@@ -10,12 +10,14 @@ from .discovery import (
     collect_class_bases,
     collect_classes,
     collect_defs,
+    collect_external_local_var_types,
     collect_local_var_types,
     collect_self_attr_types,
     discover_modules,
 )
 from .imports import build_import_table
 from .misses import MissLog
+from .resolution import EXTERNAL_FACTORIES
 from .visitor import EdgeVisitor
 
 
@@ -43,6 +45,7 @@ def build_with_report(
     class_bases: dict[str, list[str]] = {}
     self_attr_types: dict[str, dict[str, str]] = {}
     local_types: dict[str, dict[str, str]] = {}
+    external_local_types: dict[str, dict[str, str]] = {}
 
     for fqn, path in modules.items():
         try:
@@ -72,6 +75,9 @@ def build_with_report(
         local_types.update(
             collect_local_var_types(tree, fqn, import_table, known_classes)
         )
+        external_local_types.update(
+            collect_external_local_var_types(tree, fqn, import_table, EXTERNAL_FACTORIES)
+        )
 
     miss_log.files_parsed = len(parsed)
 
@@ -89,6 +95,7 @@ def build_with_report(
                 known_classes=known_classes,
                 self_attr_types=self_attr_types,
                 local_types=local_types,
+                external_local_types=external_local_types,
             )
             visitor.visit(tree)
             for caller, callees in visitor.edges.items():

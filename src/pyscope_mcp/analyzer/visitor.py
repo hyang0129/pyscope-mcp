@@ -14,6 +14,7 @@ from .misses import (
     snippet,
 )
 from .resolution import (
+    EXTERNAL_FACTORY_BUCKETS,
     ResolveCtx,
     attr_chain,
     dispatcher_callable_arg,
@@ -59,6 +60,7 @@ class EdgeVisitor(ast.NodeVisitor):
         known_classes: set[str] | None = None,
         self_attr_types: dict[str, dict[str, str]] | None = None,
         local_types: dict[str, dict[str, str]] | None = None,
+        external_local_types: dict[str, dict[str, str]] | None = None,
     ) -> None:
         self._ctx = ResolveCtx(
             module_fqn=module_fqn,
@@ -68,6 +70,7 @@ class EdgeVisitor(ast.NodeVisitor):
             known_classes=known_classes or set(),
             self_attr_types=self_attr_types or {},
             local_types=local_types or {},
+            external_local_types=external_local_types or {},
         )
         self._file_path = file_path
         self._miss_log = miss_log
@@ -317,6 +320,41 @@ class EdgeVisitor(ast.NodeVisitor):
             return accepted_tag
         return None
 
+    def _try_accept_external_local_var(self, node: ast.Call) -> str | None:
+        """For ``var.<method>(...)`` 2-part chains where ``var`` is a local variable
+        (or module-level variable) bound to a whitelisted external factory, return
+        the accepted-pattern bucket tag.
+
+        Only fires for 2-part chains (``var.method``).  Longer chains (e.g.
+        ``service.channels().list().execute()``) are not handled here — they fall
+        through to ``attr_chain_unresolved`` as before.
+
+        Lookup order:
+          1. Current function-level bindings.
+          2. Module-level bindings (for `_cli = typer.Typer()` at module scope,
+             called from inside a function like `_cli.command()`).
+
+        Returns the accepted-bucket name (e.g. ``"httpx_method_call"``) or None.
+        """
+        func = node.func
+        if not isinstance(func, ast.Attribute):
+            return None
+        chain = attr_chain(func)
+        if chain is None or len(chain) != 2 or chain[0] == "self":
+            return None
+        var_name = chain[0]
+        # 1. Function-level lookup.
+        func_fqn = self._current_func_fqn()
+        if func_fqn is not None:
+            factory_fqn = self._ctx.external_local_types.get(func_fqn, {}).get(var_name)
+            if factory_fqn is not None:
+                return EXTERNAL_FACTORY_BUCKETS.get(factory_fqn)
+        # 2. Module-level fallback: vars bound at module scope are visible inside functions.
+        factory_fqn = self._ctx.external_local_types.get(self._ctx.module_fqn, {}).get(var_name)
+        if factory_fqn is not None:
+            return EXTERNAL_FACTORY_BUCKETS.get(factory_fqn)
+        return None
+
     def _try_emit_dispatcher_edge(self, call: ast.Call) -> bool:
         """If `call` looks like `dispatcher(fn, ...)` where fn is an in-package
         callable reference, emit an extra edge to fn. Returns True iff we emitted.
@@ -370,6 +408,7 @@ class EdgeVisitor(ast.NodeVisitor):
                     sentinel_tag = (
                         self._try_accept_self_attr_sentinel(node)
                         or self._try_accept_local_var_sentinel(node)
+                        or self._try_accept_external_local_var(node)
                     )
                     if sentinel_tag is not None:
                         self._miss_log.record_accepted(sentinel_tag, self._file_path)
