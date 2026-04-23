@@ -12,6 +12,7 @@ from .discovery import (
     collect_defs,
     collect_external_local_var_types,
     collect_local_var_types,
+    collect_nested_defs,
     collect_self_attr_types,
     discover_modules,
 )
@@ -46,6 +47,7 @@ def build_with_report(
     self_attr_types: dict[str, dict[str, str]] = {}
     local_types: dict[str, dict[str, str]] = {}
     external_local_types: dict[str, dict[str, str]] = {}
+    nested_defs: dict[str, dict[str, tuple[str, int]]] = {}
 
     for fqn, path in modules.items():
         try:
@@ -78,6 +80,9 @@ def build_with_report(
         external_local_types.update(
             collect_external_local_var_types(tree, fqn, import_table, EXTERNAL_FACTORIES)
         )
+        nested_defs.update(
+            collect_nested_defs(tree, fqn)
+        )
 
     miss_log.files_parsed = len(parsed)
 
@@ -96,6 +101,7 @@ def build_with_report(
                 self_attr_types=self_attr_types,
                 local_types=local_types,
                 external_local_types=external_local_types,
+                nested_defs=nested_defs,
             )
             visitor.visit(tree)
             for caller, callees in visitor.edges.items():
