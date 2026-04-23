@@ -399,14 +399,132 @@ def collect_local_var_types(
     return result
 
 
+def _is_none_literal(node: ast.expr) -> bool:
+    """Return True if node is the literal ``None`` (ast.Constant(value=None))."""
+    return isinstance(node, ast.Constant) and node.value is None
+
+
+def _resolve_union_lhs(
+    value: ast.expr,
+    import_table: dict[str, str],
+) -> str | None:
+    """Resolve the LHS of a Subscript to a normalised typing FQN.
+
+    Returns one of ``"typing.Optional"``, ``"typing.Union"``, or ``None``.
+    We accept both bare names (``Optional``, ``Union``) and qualified forms
+    (``typing.Optional``, ``t.Union``) by checking the import table.
+    """
+    # Bare name: Optional[X] or Union[X, Y]
+    if isinstance(value, ast.Name):
+        name = value.id
+        if name in ("Optional", "Union"):
+            # Check import_table to see if it really maps to typing.*
+            target = import_table.get(name)
+            if target in ("typing.Optional", "typing.Union"):
+                return target
+            # Bare name with no confirmed import mapping.  In practice, bare
+            # `Optional` and `Union` nearly always come from `from typing import
+            # Optional/Union` — accept them.  A user-defined class named
+            # Optional/Union subscripted in an annotation is pathological and
+            # not guarded here.
+            if name == "Optional":
+                return "typing.Optional"
+            if name == "Union":
+                return "typing.Union"
+        return None
+
+    # Qualified form: typing.Optional[X], t.Union[X, Y]
+    chain = attr_chain(value)
+    if chain is None:
+        return None
+    for prefix_len in range(len(chain) - 1, 0, -1):
+        prefix = ".".join(chain[:prefix_len])
+        target = import_table.get(prefix)
+        if target is not None:
+            remainder = chain[prefix_len:]
+            resolved = ".".join([target] + remainder)
+            if resolved in ("typing.Optional", "typing.Union"):
+                return resolved
+    # Fully qualified without import alias: e.g. typing.Optional without import
+    dotted = ".".join(chain)
+    if dotted in ("typing.Optional", "typing.Union"):
+        return dotted
+    return None
+
+
 def _resolve_annotation_to_class(
     annotation: ast.expr | str,
     module_fqn: str,
     import_table: dict[str, str],
     known_classes: set[str],
 ) -> str | None:
-    """Resolve a type annotation (or forward-ref string) to an in-package class FQN."""
-    # Handle forward-reference string annotations e.g. "ClassName" or "mod.ClassName"
+    """Resolve a type annotation (or forward-ref string) to an in-package class FQN.
+
+    Handles:
+    - ``ast.Name`` / ``ast.Attribute`` / dotted chains — simple name lookup.
+    - ``ast.Constant(str)`` — forward-reference string annotations.
+    - ``ast.BinOp(op=BitOr)`` — PEP 604 union (``X | None``, ``X | Y``).
+    - ``ast.Subscript`` with typing.Optional or typing.Union LHS.
+
+    False-positive guards: ``list[X]``, ``dict[K, V]``, ``Callable[...]``,
+    ``Annotated[X, ...]`` all return ``None`` — only Union-shaped subscripts
+    are peeled.
+    """
+    # ------------------------------------------------------------------ #
+    # PEP 604 union: X | Y  (left-associative; None literals are skipped) #
+    # ------------------------------------------------------------------ #
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        # Filter None on either side immediately.
+        if not _is_none_literal(annotation.left):
+            result = _resolve_annotation_to_class(
+                annotation.left, module_fqn, import_table, known_classes
+            )
+            if result is not None:
+                return result
+        if not _is_none_literal(annotation.right):
+            result = _resolve_annotation_to_class(
+                annotation.right, module_fqn, import_table, known_classes
+            )
+            if result is not None:
+                return result
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Subscript: Optional[X] or Union[X, Y, ...]                         #
+    # Guard: only peel recognised typing forms; list[X], Callable, etc.  #
+    # must NOT be treated as unions.                                      #
+    # ------------------------------------------------------------------ #
+    if isinstance(annotation, ast.Subscript):
+        typing_form = _resolve_union_lhs(annotation.value, import_table)
+        if typing_form == "typing.Optional":
+            # Optional[X] → recurse on slice.
+            return _resolve_annotation_to_class(
+                annotation.slice, module_fqn, import_table, known_classes
+            )
+        if typing_form == "typing.Union":
+            # Union[X, Y, ...] → try each elt in order, first in-package wins.
+            slc = annotation.slice
+            elts: list[ast.expr]
+            if isinstance(slc, ast.Tuple):
+                elts = slc.elts
+            else:
+                # Union[X] (degenerate but legal) — treat slice as single elt.
+                elts = [slc]
+            for elt in elts:
+                if _is_none_literal(elt):
+                    continue
+                result = _resolve_annotation_to_class(
+                    elt, module_fqn, import_table, known_classes
+                )
+                if result is not None:
+                    return result
+            return None
+        # Not a recognised union form — return None (guards list[X], Callable, etc.)
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Forward-reference string annotation e.g. "ClassName" or "mod.C"   #
+    # ------------------------------------------------------------------ #
     if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
         raw = annotation.value.strip()
         # Try as a simple name first
@@ -434,6 +552,9 @@ def _resolve_annotation_to_class(
             return dotted
         return None
 
+    # ------------------------------------------------------------------ #
+    # Bare name                                                           #
+    # ------------------------------------------------------------------ #
     if isinstance(annotation, ast.Name):
         name = annotation.id
         if name in import_table:
@@ -445,6 +566,9 @@ def _resolve_annotation_to_class(
             return candidate
         return None
 
+    # ------------------------------------------------------------------ #
+    # Attribute chain: mod.ClassName, pkg.sub.ClassName                  #
+    # ------------------------------------------------------------------ #
     chain = attr_chain(annotation)
     if chain is None:
         return None
