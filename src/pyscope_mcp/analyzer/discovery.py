@@ -573,6 +573,8 @@ def _scan_function_body(
             resolved = _resolve_annotation_to_class(
                 arg.annotation, module_fqn, import_table, known_classes
             )
+            if resolved is None:
+                resolved = _infer_sentinel_from_annotation(arg.annotation, import_table)
             if resolved is not None:
                 var_types[arg.arg] = resolved
 
@@ -627,6 +629,8 @@ def _walk_body_for_bindings(
                 resolved = _infer_constructor_class(
                     stmt.value, module_fqn, import_table, known_classes
                 )
+                if resolved is None:
+                    resolved = _infer_sentinel_from_rhs(stmt.value, import_table)
                 if resolved is not None:
                     var_types[var_name] = resolved
 
@@ -637,6 +641,8 @@ def _walk_body_for_bindings(
                 resolved = _resolve_annotation_to_class(
                     stmt.annotation, module_fqn, import_table, known_classes
                 )
+                if resolved is None:
+                    resolved = _infer_sentinel_from_annotation(stmt.annotation, import_table)
                 if resolved is not None:
                     var_types[var_name] = resolved
 
