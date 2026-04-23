@@ -49,6 +49,17 @@ EXTERNAL_RETURNS: dict[tuple[str, str], str] = {
     ("boto3.resource", "get_paginator"): "boto3.paginator.Paginator",
 }
 
+# External types whose every method returns the same type (self-returning /
+# fluent-interface pattern).  Used by the visitor to walk inline chained calls
+# of arbitrary depth, e.g.:
+#   service.channels().list(part="snippet").execute()
+# The root variable's bound factory FQN must be in this set for chain-walking
+# to activate.  Only add types where the self-returning contract is broad
+# enough that classifier accuracy is not harmed.
+EXTERNAL_SELF_RETURNING: frozenset[str] = frozenset({
+    "googleapiclient.discovery.Resource",
+})
+
 # Map external factory FQN → accepted classifier bucket name.
 EXTERNAL_FACTORY_BUCKETS: dict[str, str] = {
     "httpx.Client": "httpx_method_call",
@@ -59,6 +70,13 @@ EXTERNAL_FACTORY_BUCKETS: dict[str, str] = {
     "typer.Typer": "typer_method_call",
     "googleapiclient.discovery.Resource": "googleapi_method_call",
 }
+
+# Drift guard: every self-returning type must have a bucket mapping so the
+# chain walker can always emit a valid bucket label.
+assert all(t in EXTERNAL_FACTORY_BUCKETS for t in EXTERNAL_SELF_RETURNING), (
+    "EXTERNAL_SELF_RETURNING contains entries missing from EXTERNAL_FACTORY_BUCKETS: "
+    + str({t for t in EXTERNAL_SELF_RETURNING if t not in EXTERNAL_FACTORY_BUCKETS})
+)
 
 
 # ---------------------------------------------------------------------------

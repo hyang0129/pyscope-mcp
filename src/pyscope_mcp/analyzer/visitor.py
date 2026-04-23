@@ -15,6 +15,7 @@ from .misses import (
 )
 from .resolution import (
     EXTERNAL_FACTORY_BUCKETS,
+    EXTERNAL_SELF_RETURNING,
     ResolveCtx,
     attr_chain,
     dispatcher_callable_arg,
@@ -403,6 +404,82 @@ class EdgeVisitor(ast.NodeVisitor):
             return EXTERNAL_FACTORY_BUCKETS.get(factory_fqn)
         return None
 
+    def _try_accept_external_chained(self, node: ast.Call) -> str | None:
+        """For inline chained calls rooted at a self-returning external local var,
+        return the accepted-pattern bucket tag.
+
+        Handles patterns like::
+
+            service.channels().list(part="snippet").execute()
+
+        where ``service`` is bound to a factory FQN in ``EXTERNAL_SELF_RETURNING``.
+        The chain is walked from the outermost Call inward: each segment is an
+        Attribute node whose value is either a Call (keep walking) or a Name (root).
+
+        Only fires when the root variable's factory FQN is in
+        ``EXTERNAL_SELF_RETURNING``.  Returns the bucket tag or None.
+
+        False-positive guards:
+        - Root variable bound to a NON-self-returning factory → None.
+        - Root variable unbound (unknown) → None.
+        - Chain rooted at ``self`` → None (handled by self-attr resolvers).
+        - Chain rooted at an in-package class local var → None (local_types wins
+          via ``_resolve_expr`` before this is called; this is a last-resort path).
+        """
+        func = node.func
+        # We need at least one intermediate Call in the chain, so func must be
+        # an Attribute whose value is a Call (not a plain Name or static chain).
+        if not isinstance(func, ast.Attribute):
+            return None
+        if not isinstance(func.value, ast.Call):
+            return None
+
+        # Walk the chain inward to find the root Name.
+        # The chain looks like:  Name.attr().(attr().)*.attr  — outermost Call
+        # node's func is Attribute(value=Call(...), attr=terminal).
+        # We don't need the terminal method name for bucket lookup — we only need
+        # to confirm the root variable is self-returning.
+        cur: ast.expr = func.value  # the innermost-so-far Call
+        while True:
+            if isinstance(cur, ast.Call):
+                inner_func = cur.func
+                if isinstance(inner_func, ast.Attribute):
+                    if isinstance(inner_func.value, ast.Name):
+                        # Root reached: inner_func.value is the variable name.
+                        root_name = inner_func.value.id
+                        break
+                    elif isinstance(inner_func.value, ast.Call):
+                        # Another Call layer — keep descending.
+                        cur = inner_func.value
+                        continue
+                # Anything else (e.g. subscript, complex expression) → give up.
+                return None
+            else:
+                return None
+
+        # Guard: self-rooted chains are handled elsewhere.
+        if root_name == "self":
+            return None
+
+        # Look up the root variable's factory FQN.
+        factory_fqn: str | None = None
+        func_fqn = self._current_func_fqn()
+        if func_fqn is not None:
+            factory_fqn = self._ctx.external_local_types.get(func_fqn, {}).get(root_name)
+        if factory_fqn is None:
+            # Module-level fallback (e.g. module-scope typer.Typer instance).
+            factory_fqn = self._ctx.external_local_types.get(
+                self._ctx.module_fqn, {}
+            ).get(root_name)
+        if factory_fqn is None:
+            return None
+
+        # Only fire for self-returning types.
+        if factory_fqn not in EXTERNAL_SELF_RETURNING:
+            return None
+
+        return EXTERNAL_FACTORY_BUCKETS.get(factory_fqn)
+
     def _try_emit_dispatcher_edge(self, call: ast.Call) -> bool:
         """If `call` looks like `dispatcher(fn, ...)` where fn is an in-package
         callable reference, emit an extra edge to fn. Returns True iff we emitted.
@@ -466,6 +543,7 @@ class EdgeVisitor(ast.NodeVisitor):
                         self._try_accept_self_attr_sentinel(node)
                         or self._try_accept_local_var_sentinel(node)
                         or self._try_accept_external_local_var(node)
+                        or self._try_accept_external_chained(node)
                     )
                     if sentinel_tag is not None:
                         self._miss_log.record_accepted(sentinel_tag, self._file_path)
