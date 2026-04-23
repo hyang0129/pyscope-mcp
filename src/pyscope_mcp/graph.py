@@ -49,9 +49,21 @@ class _DiGraph:
         return sum(len(v) for v in self._succ.values())
 
     # ----------------------------------------------------------------- views
-    def reverse(self, copy: bool = False) -> "_DiGraphReverseView":  # noqa: ARG002
-        """Return a view that swaps successor/predecessor lookup (no copy)."""
+    def reverse(self, copy: bool = False) -> "_DiGraphReverseView":
+        """Return a view that swaps successor/predecessor lookup (no copy).
+
+        ``copy=True`` is not supported — this implementation only holds a live
+        view.  Passing ``copy=True`` raises ``NotImplementedError``.
+        """
+        if copy:
+            raise NotImplementedError("_DiGraph.reverse(copy=True) is not supported")
         return _DiGraphReverseView(self)
+
+    # --------------------------------------------------------------- display
+    def __repr__(self) -> str:
+        return (
+            f"_DiGraph(nodes={self.number_of_nodes()}, edges={self.number_of_edges()})"
+        )
 
 
 class _DiGraphReverseView:
@@ -68,6 +80,22 @@ class _DiGraphReverseView:
 
     def __contains__(self, n: object) -> bool:
         return n in self._g._succ
+
+    @property
+    def nodes(self):  # type: ignore[return]
+        return self._g._succ.keys()
+
+    def number_of_nodes(self) -> int:
+        return self._g.number_of_nodes()
+
+    def number_of_edges(self) -> int:
+        return self._g.number_of_edges()
+
+    def __repr__(self) -> str:
+        return (
+            f"_DiGraphReverseView(nodes={self.number_of_nodes()},"
+            f" edges={self.number_of_edges()})"
+        )
 
 
 @dataclass
@@ -150,11 +178,16 @@ def _module_of(fqn: str) -> str:
 
 
 def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> list[str]:
-    if start not in g:
+    """BFS from *start* up to *depth* hops.
+
+    ``depth=0`` returns ``[]``.  ``depth=1`` returns direct neighbours only.
+    ``depth=N`` returns all nodes reachable within N hops (excluding *start*).
+    """
+    if depth <= 0 or start not in g:
         return []
     seen: set[str] = {start}
     frontier = [start]
-    for _ in range(max(1, depth)):
+    for _ in range(depth):
         nxt: list[str] = []
         for n in frontier:
             for s in g.successors(n):
