@@ -171,6 +171,11 @@ async def _tools_list(id, params):  # noqa: A002
 # ---------------------------------------------------------------------------
 @_SERVER.method("tools/call")
 async def _tools_call(id, params):  # noqa: A002
+    # Tool-level shape validation: non-dict params surface as isError:true
+    # (MCP convention), not -32603 INTERNAL_ERROR. This guard is handler-local
+    # — the _rpc dispatcher remains permissive per issue #40.
+    if params is not None and not isinstance(params, dict):
+        return _error_result("params must be an object")
     p = params or {}
     name = p.get("name")
     arguments = p.get("arguments")

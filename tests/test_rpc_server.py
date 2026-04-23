@@ -799,22 +799,23 @@ async def test_non_string_method(server: RpcServer):
 
 @pytest.mark.asyncio
 async def test_params_non_object(server: RpcServer):
-    """Non-object params (array) — the dispatcher should not crash the loop.
+    """Non-object params on tools/call — handler-level isError:true.
 
-    Issue #40 specifies permissive parsing: no centralised guard rejects non-dict
-    params. A list-typed params value is passed through to the handler. In
-    _tools_call, `params or {}` leaves a non-empty list as-is, causing `.get()`
-    to raise AttributeError. The _loop's except-Exception handler surfaces this as
-    an INTERNAL_ERROR JSON-RPC error. The key invariant is that the loop survives
-    and continues servicing subsequent requests.
+    The _rpc dispatcher remains permissive per issue #40 (no centralised
+    params-type guard). The tools/call handler itself rejects non-dict params
+    as a tool-level shape failure: isError:true in a successful RPC response
+    (MCP convention), not a -32603 JSON-RPC error. Other handlers (ping,
+    initialize, tools/list, shutdown) keep the permissive coercion.
     """
     lines = [
         _line({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [1, 2, 3]}),
         _req("ping", req_id=2),
     ]
     responses = await _run(server, lines)
-    # First response: well-formed JSON-RPC frame; loop did not crash
+    # First response: definite isError:true result (not a JSON-RPC error)
     assert responses[0]["id"] == 1
+    assert "result" in responses[0] and "error" not in responses[0]
+    assert responses[0]["result"]["isError"] is True
     # Loop continues:
     assert responses[1]["id"] == 2
     assert responses[1]["result"] == {}
