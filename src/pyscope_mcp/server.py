@@ -171,7 +171,6 @@ async def _tools_list(id, params):  # noqa: A002
 # ---------------------------------------------------------------------------
 @_SERVER.method("tools/call")
 async def _tools_call(id, params):  # noqa: A002
-    global _INDEX
     p = params or {}
     name = p.get("name")
     arguments = p.get("arguments") or {}
