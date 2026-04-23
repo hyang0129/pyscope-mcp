@@ -156,9 +156,38 @@ def infer_call_class_type(call: ast.Call, ctx: "ResolveCtx") -> str | None:
     Returns None for non-class callables (functions, unknowns, builtins).
     Only returns the FQN if it is in ctx.known_classes (not just known_fqns —
     must be a class, not a function).
+
+    Also handles ``ClassName.__new__(ClassName)`` — the ``.__new__`` attr is
+    stripped and the receiver is resolved to a class FQN.  Mirrors the same
+    branch in discovery._infer_constructor_class; keep them in sync.
     """
     func = call.func
     candidate: str | None = None
+
+    # ClassName.__new__(...) — treat as constructor for ClassName.
+    if isinstance(func, ast.Attribute) and func.attr == "__new__":
+        inner = func.value
+        if isinstance(inner, ast.Name):
+            name = inner.id
+            if name in ctx.import_table:
+                candidate = ctx.import_table[name]
+            else:
+                candidate = f"{ctx.module_fqn}.{name}"
+        else:
+            inner_chain = attr_chain(inner)
+            if inner_chain is not None:
+                for prefix_len in range(len(inner_chain) - 1, 0, -1):
+                    prefix = ".".join(inner_chain[:prefix_len])
+                    if prefix in ctx.import_table:
+                        base_fqn = ctx.import_table[prefix]
+                        remainder = inner_chain[prefix_len:]
+                        candidate = ".".join([base_fqn] + remainder)
+                        break
+                else:
+                    candidate = ".".join(inner_chain)
+        if candidate is not None and candidate in ctx.known_classes:
+            return candidate
+        return None
 
     if isinstance(func, ast.Name):
         name = func.id
