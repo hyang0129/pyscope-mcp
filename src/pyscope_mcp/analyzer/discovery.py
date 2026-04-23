@@ -8,6 +8,84 @@ from pathlib import Path
 from .imports import build_import_table
 from .resolution import attr_chain
 
+# Sentinel FQN strings for builtin/pathlib types that are NOT in known_fqns but
+# are meaningful to the visitor for accepted-pattern routing.
+SENTINEL_BUILTIN_TYPES: frozenset[str] = frozenset({
+    "builtins.dict",
+    "builtins.list",
+    "builtins.set",
+    "builtins.tuple",
+    "pathlib.Path",
+})
+
+# Annotation names that map to builtin sentinel FQNs.
+_BUILTIN_ANNOTATION_NAMES: dict[str, str] = {
+    "dict": "builtins.dict",
+    "list": "builtins.list",
+    "set": "builtins.set",
+    "tuple": "builtins.tuple",
+    "Dict": "builtins.dict",
+    "List": "builtins.list",
+    "Set": "builtins.set",
+    "Tuple": "builtins.tuple",
+}
+
+
+def _infer_sentinel_from_annotation(
+    annotation: ast.expr,
+    import_table: dict[str, str],
+) -> str | None:
+    """Return a sentinel FQN if annotation is a recognised builtin or pathlib.Path type.
+
+    Handles: bare Name (dict, list, set, tuple, Path), and subscripted forms
+    like dict[str, Any] (ast.Subscript whose value is a Name).
+    """
+    target = annotation
+    # Unwrap subscript: dict[str, Any] → dict
+    if isinstance(target, ast.Subscript):
+        target = target.value
+
+    if isinstance(target, ast.Name):
+        name = target.id
+        if name in _BUILTIN_ANNOTATION_NAMES:
+            return _BUILTIN_ANNOTATION_NAMES[name]
+        # Path — only if import_table explicitly maps it to pathlib.Path.
+        # Do NOT assume bare 'Path' without an explicit import; user code may
+        # define its own Path class.
+        if import_table.get(name) == "pathlib.Path":
+            return "pathlib.Path"
+    return None
+
+
+def _infer_sentinel_from_rhs(
+    rhs: ast.expr,
+    import_table: dict[str, str],
+) -> str | None:
+    """Return a sentinel FQN if rhs is a recognised builtin literal or Path() call."""
+    # Literal dict: {}
+    if isinstance(rhs, ast.Dict):
+        return "builtins.dict"
+    # Literal list: []
+    if isinstance(rhs, ast.List):
+        return "builtins.list"
+    # Literal set: set() or {1, 2}
+    if isinstance(rhs, ast.Set):
+        return "builtins.set"
+    # Literal tuple: ()
+    if isinstance(rhs, ast.Tuple):
+        return "builtins.tuple"
+    # Constructor call: Path(...), dict(...), list(...), set(...), tuple(...)
+    if isinstance(rhs, ast.Call):
+        func = rhs.func
+        if isinstance(func, ast.Name):
+            name = func.id
+            if name in _BUILTIN_ANNOTATION_NAMES:
+                return _BUILTIN_ANNOTATION_NAMES[name]
+            # Path(...) — only if import_table explicitly maps it to pathlib.Path.
+            if import_table.get(name) == "pathlib.Path":
+                return "pathlib.Path"
+    return None
+
 
 def discover_modules(root: Path, package: str) -> dict[str, Path]:
     """Walk root, return mapping of dotted FQN -> path for every .py file."""
@@ -97,10 +175,14 @@ def collect_self_attr_types(
        existing import/alias machinery.
     2. RHS is a bare name that matches an annotated ``__init__`` parameter:
        ``def __init__(self, foo: Foo)`` + ``self.X = foo`` → ``Foo``.
+    3. RHS is a builtin literal (``{}``, ``[]``, ``set()``, ``tuple()``) or
+       ``Path(...)`` call → sentinel FQN (e.g. ``"builtins.dict"``).
+    4. Class-body ``AnnAssign`` ``self.X: T`` (typed attribute declaration).
+    5. Parameter annotation is a builtin/pathlib type: ``cfg: dict`` + ``self.x = cfg``.
 
     First-assignment-wins; no flow-sensitive reassignment tracking.
     No tuple/dict unpacking, no factory-function return-type resolution.
-    Returns only attrs whose inferred type is in ``known_fqns``.
+    Returns attrs whose inferred type is in ``known_fqns`` OR is a sentinel type.
     """
     result: dict[str, dict[str, str]] = {}
 
@@ -108,7 +190,47 @@ def collect_self_attr_types(
         if not isinstance(node, ast.ClassDef):
             continue
         class_fqn = f"{module_fqn}.{node.name}"
+        attr_types: dict[str, str] = result.setdefault(class_fqn, {})
 
+        # Source 1: class-body AnnAssign nodes — e.g. ``x: dict[str, Any]``
+        for stmt in ast.iter_child_nodes(node):
+            if not isinstance(stmt, ast.AnnAssign):
+                continue
+            # We want ``self.x: T`` (Attribute target) or bare class-level ``x: T``.
+            # Class-level ``x: T`` is a common pattern for typed attrs (dataclass-style).
+            target = stmt.target
+            if isinstance(target, ast.Name):
+                attr_name = target.id
+                if attr_name in attr_types:
+                    continue
+                sentinel = _infer_sentinel_from_annotation(stmt.annotation, import_table)
+                if sentinel is not None:
+                    attr_types[attr_name] = sentinel
+                else:
+                    resolved = _resolve_annotation(
+                        stmt.annotation, module_fqn, import_table, known_fqns
+                    )
+                    if resolved is not None:
+                        attr_types[attr_name] = resolved
+            elif (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                attr_name = target.attr
+                if attr_name in attr_types:
+                    continue
+                sentinel = _infer_sentinel_from_annotation(stmt.annotation, import_table)
+                if sentinel is not None:
+                    attr_types[attr_name] = sentinel
+                else:
+                    resolved = _resolve_annotation(
+                        stmt.annotation, module_fqn, import_table, known_fqns
+                    )
+                    if resolved is not None:
+                        attr_types[attr_name] = resolved
+
+        # Source 2: __init__ / __post_init__ body assignments.
         for child in ast.iter_child_nodes(node):
             if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -121,14 +243,20 @@ def collect_self_attr_types(
                 if arg.arg == "self":
                     continue
                 if arg.annotation is not None:
+                    # Try in-package first, then sentinel.
                     resolved = _resolve_annotation(
                         arg.annotation, module_fqn, import_table, known_fqns
                     )
                     if resolved is not None:
                         param_types[arg.arg] = resolved
+                    else:
+                        sentinel = _infer_sentinel_from_annotation(
+                            arg.annotation, import_table
+                        )
+                        if sentinel is not None:
+                            param_types[arg.arg] = sentinel
 
             # Walk the body for ``self.X = ...`` assignments.
-            attr_types: dict[str, str] = result.setdefault(class_fqn, {})
             for stmt in ast.walk(child):
                 if not isinstance(stmt, ast.Assign):
                     continue
@@ -196,10 +324,18 @@ def _infer_type(
     known_fqns: set[str],
     param_types: dict[str, str],
 ) -> str | None:
-    """Infer the class type of an RHS expression (best-effort, v1 scope only)."""
-    # Case 1: bare name → parameter annotation.
+    """Infer the class type of an RHS expression (best-effort, v1 scope only).
+
+    Returns an in-package FQN, a sentinel FQN (e.g. ``"builtins.dict"``), or None.
+    """
+    # Case 1: bare name → parameter annotation (may be sentinel or in-package).
     if isinstance(rhs, ast.Name):
         return param_types.get(rhs.id)
+
+    # Case 1b: builtin literal → sentinel.
+    sentinel = _infer_sentinel_from_rhs(rhs, import_table)
+    if sentinel is not None:
+        return sentinel
 
     # Case 2: constructor call: Foo(...) or pkg.Foo(...) or aliased.Foo(...)
     if isinstance(rhs, ast.Call):
