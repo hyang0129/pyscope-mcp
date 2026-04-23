@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 
+from .discovery import SENTINEL_BUILTIN_TYPES
 from .misses import (
     ACCEPTED_PATTERNS,
     BUILTIN_COLLECTION_METHODS,
@@ -24,6 +25,7 @@ from .resolution import (
 )
 
 # Map sentinel FQN → accepted pattern tag + valid method set.
+# Keys must exactly match SENTINEL_BUILTIN_TYPES in discovery.py (single source of truth).
 _SENTINEL_ACCEPTED: dict[str, tuple[str, frozenset[str]]] = {
     "builtins.dict": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
     "builtins.list": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
@@ -31,6 +33,10 @@ _SENTINEL_ACCEPTED: dict[str, tuple[str, frozenset[str]]] = {
     "builtins.tuple": ("builtin_method_call", BUILTIN_COLLECTION_METHODS),
     "pathlib.Path": ("pathlib_method_call", PATHLIB_METHODS),
 }
+
+assert set(_SENTINEL_ACCEPTED) == SENTINEL_BUILTIN_TYPES, (
+    "visitor._SENTINEL_ACCEPTED keys diverged from discovery.SENTINEL_BUILTIN_TYPES"
+)
 
 
 class EdgeVisitor(ast.NodeVisitor):
