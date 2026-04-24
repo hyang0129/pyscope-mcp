@@ -60,8 +60,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     print(f"[pyscope-mcp] building index: root={root} package={package or root.name}", file=sys.stderr)
     from pyscope_mcp.analyzer import build_with_report
 
-    raw, miss_report, skeletons = build_with_report(root, package=package or root.name)
-    idx = CallGraphIndex.from_raw(root, raw, skeletons=skeletons)
+    raw, miss_report, skeletons, file_shas = build_with_report(root, package=package or root.name)
+    idx = CallGraphIndex.from_raw(root, raw, skeletons=skeletons, file_shas=file_shas)
     idx.save(out)
 
     # Write misses sidecar next to index.json

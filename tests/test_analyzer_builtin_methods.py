@@ -176,7 +176,7 @@ def test_calls_total_invariant(tmp_path: Path) -> None:
             "    unknown_fn(x)     # unresolved bare_name\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     s = report["summary"]
     total = s["calls_total"]
     parts = (

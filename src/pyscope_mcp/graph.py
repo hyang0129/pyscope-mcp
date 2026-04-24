@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,6 +128,8 @@ class CallGraphIndex:
     module_graph: _DiGraph = field(default_factory=_DiGraph)
     raw: dict[str, list[str]] = field(default_factory=dict)
     skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
+    # None = pre-v3 index (no hashes stored); dict = v3 index with per-file SHA256 digests.
+    file_shas: dict[str, str] | None = field(default=None)
 
     @classmethod
     def from_raw(
@@ -134,6 +137,7 @@ class CallGraphIndex:
         root: str | Path,
         raw: dict[str, list[str]],
         skeletons: dict[str, list[SymbolSummary]] | None = None,
+        file_shas: dict[str, str] | None = None,
     ) -> "CallGraphIndex":
         root = Path(root).resolve()
         fg = _DiGraph()
@@ -153,16 +157,18 @@ class CallGraphIndex:
             module_graph=mg,
             raw=raw,
             skeletons=skeletons or {},
+            file_shas=file_shas,
         )
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {
-            "version": 2,
+            "version": 3,
             "root": str(self.root),
             "raw": self.raw,
             "skeletons": self.skeletons,
+            "file_shas": self.file_shas if self.file_shas is not None else {},
         }
         path.write_text(json.dumps(payload))
         return path
@@ -172,10 +178,20 @@ class CallGraphIndex:
         path = Path(path)
         payload = json.loads(path.read_text())
         version = payload.get("version")
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError(f"unsupported index version: {version}")
         skeletons: dict[str, list[SymbolSummary]] = payload.get("skeletons", {})
-        return cls.from_raw(Path(payload["root"]), payload["raw"], skeletons=skeletons)
+        # v1/v2: no file_shas stored — use None as sentinel to signal pre-v3.
+        # v3: read the stored file_shas dict.
+        file_shas: dict[str, str] | None = None if version < 3 else payload.get("file_shas", {})
+        return cls.from_raw(
+            Path(payload["root"]),
+            payload["raw"],
+            skeletons=skeletons,
+            file_shas=file_shas,
+        )
+
+    _STALE_ACTION = "Run 'pyscope-mcp build' then 'reload' to update the index."
 
     def file_skeleton(self, path: str, cap: int = _SKELETON_CAP) -> dict:
         """Return a compact symbol list for the given relative file path.
@@ -184,25 +200,85 @@ class CallGraphIndex:
           - ``results``: list of SymbolSummary dicts sorted by lineno (capped at *cap*)
           - ``truncated``: True when the full symbol count exceeds *cap*
           - ``total``: total number of symbols before capping
+          - ``stale``: True when the live file differs from what was indexed
+          - ``staleness_info``: dict with ``reason`` and ``action`` when ``stale`` is True
 
+        Staleness reasons:
+          - ``file_changed``: file exists but content has changed since build
+          - ``file_not_found``: file was in the index but no longer exists on disk
+          - ``file_not_in_index``: path not in index (also sets ``isError: True``)
+          - ``index_format_incompatible``: index is pre-v3 and has no stored hashes
+
+        Results are always returned when the path is in the index, even when stale.
         If the path is not in the index, returns an error dict with ``isError: True``.
         """
+        # Scenario D / Scenario E (isError cases that may also carry stale info)
         if path not in self.skeletons:
+            if self.file_shas is None:
+                # Pre-v3 index: stale, but we can't distinguish not-in-index from
+                # index_format_incompatible for paths absent from skeletons.
+                # Since the path isn't in skeletons either, use file_not_in_index.
+                return {
+                    "isError": True,
+                    "stale": True,
+                    "staleness_info": {
+                        "reason": "file_not_in_index",
+                        "action": self._STALE_ACTION,
+                    },
+                }
             return {
                 "isError": True,
-                "message": (
-                    f"File '{path}' is not in the index. "
-                    "Run 'pyscope-mcp build' and then 'reload' to update the index."
-                ),
+                "stale": True,
+                "staleness_info": {
+                    "reason": "file_not_in_index",
+                    "action": self._STALE_ACTION,
+                },
             }
+
         symbols = self.skeletons[path]
         total = len(symbols)
         truncated = total > cap
-        return {
+        base_result: dict = {
             "results": symbols[:cap],
             "truncated": truncated,
             "total": total,
         }
+
+        # Scenario E: pre-v3 index — no hashes available.
+        if self.file_shas is None:
+            base_result["stale"] = True
+            base_result["staleness_info"] = {
+                "reason": "index_format_incompatible",
+                "action": self._STALE_ACTION,
+            }
+            return base_result
+
+        # Scenarios A/B/C: v3 index — compare live file hash against stored hash.
+        live_file = self.root / path
+        if not live_file.exists():
+            # Scenario C: file deleted since build.
+            base_result["stale"] = True
+            base_result["staleness_info"] = {
+                "reason": "file_not_found",
+                "action": self._STALE_ACTION,
+            }
+            return base_result
+
+        stored_sha = self.file_shas.get(path)
+        live_sha = hashlib.sha256(live_file.read_bytes()).hexdigest()
+
+        if stored_sha is None or live_sha != stored_sha:
+            # Scenario B: file changed.
+            base_result["stale"] = True
+            base_result["staleness_info"] = {
+                "reason": "file_changed",
+                "action": self._STALE_ACTION,
+            }
+            return base_result
+
+        # Scenario A: fresh — hashes match.
+        base_result["stale"] = False
+        return base_result
 
     def callers_of(self, fqn: str, depth: int = 1) -> list[str]:
         return _bfs(self.function_graph.reverse(copy=False), fqn, depth)

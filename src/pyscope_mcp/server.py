@@ -167,9 +167,13 @@ _TOOL_LIST = [
             "signature (first def-line only, no body), and lineno. "
             "Results are sorted by lineno and capped at 50; when the cap triggers, "
             "`truncated` is true and `total` holds the full count. "
-            "If the file was added after the last build, returns isError:true — run "
-            "'pyscope-mcp build' then 'reload'. "
-            "Returns {results: [...], truncated: bool, total: int} or {isError: true, message: str}."
+            "Response always includes `stale: bool`. When stale is true, `staleness_info` "
+            "provides a machine-readable `reason` (file_changed | file_not_found | "
+            "file_not_in_index | index_format_incompatible) and an `action` string. "
+            "If the file was added after the last build (file_not_in_index), returns "
+            "isError:true alongside stale fields. "
+            "Returns {results: [...], truncated: bool, total: int, stale: bool, "
+            "staleness_info?: {reason, action}} or {isError: true, stale: true, staleness_info: {...}}."
         ),
         "inputSchema": {
             "type": "object",
@@ -300,7 +304,9 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
             return _error_result("file_skeleton requires 'path'")
         result = idx.file_skeleton(path)
         if result.get("isError"):
-            return {"content": [{"type": "text", "text": result["message"]}], "isError": True}
+            # Emit the full dict (including stale/staleness_info) so callers can
+            # branch on machine-readable staleness fields, not just the message string.
+            return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
         return _text(result)
 
     # Should never reach here — guarded by _TOOL_NAMES check above

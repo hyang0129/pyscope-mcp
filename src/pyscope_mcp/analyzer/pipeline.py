@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import sys
 from pathlib import Path
 
@@ -120,11 +121,14 @@ def _first_def_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
 def build_with_report(
     root: str | Path,
     package: str,
-) -> tuple[dict[str, list[str]], dict, dict[str, list[dict]]]:
-    """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict, skeletons).
+) -> tuple[dict[str, list[str]], dict, dict[str, list[dict]], dict[str, str]]:
+    """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict, skeletons, file_shas).
 
     ``skeletons`` maps relative file paths to pre-computed symbol lists suitable
-    for storage in the index under the ``skeletons`` key (version 2 schema).
+    for storage in the index under the ``skeletons`` key (version 3 schema).
+
+    ``file_shas`` maps relative file paths to SHA256 hex digests of the file
+    bytes at build time, used by ``file_skeleton()`` to detect stale results.
     """
     root = Path(root)
     pkg_root = root / package if (root / package).is_dir() else root
@@ -136,6 +140,7 @@ def build_with_report(
 
     # Pass 1: parse all files; collect defs, import tables, class bases.
     parsed: list[tuple[str, ast.Module, Path, dict[str, str]]] = []
+    file_shas: dict[str, str] = {}
     known_fqns: set[str] = set()
     known_classes: set[str] = set()
     class_bases: dict[str, list[str]] = {}
@@ -146,12 +151,19 @@ def build_with_report(
 
     for fqn, path in modules.items():
         try:
-            source = path.read_text(encoding="utf-8", errors="replace")
+            raw_bytes = path.read_bytes()
+            source = raw_bytes.decode("utf-8", errors="replace")
             tree = ast.parse(source, filename=str(path))
             known_fqns.update(collect_defs(tree, fqn))
             known_classes.update(collect_classes(tree, fqn))
             import_table = build_import_table(tree, fqn)
             parsed.append((fqn, tree, path, import_table))
+            # Compute SHA256 from the raw bytes already in memory — no second disk read.
+            try:
+                rel = str(path.relative_to(root))
+            except ValueError:
+                rel = str(path)
+            file_shas[rel] = hashlib.sha256(raw_bytes).hexdigest()
         except SyntaxError as exc:
             reason = f"SyntaxError: {exc}"
             _warn(f"skipping {path}: {reason}")
@@ -207,7 +219,7 @@ def build_with_report(
     raw = {caller: sorted(callees) for caller, callees in sorted(all_edges.items())}
     report = miss_log.to_dict(raw, known_fqns)
     skeletons = _extract_skeletons(root, parsed)
-    return raw, report, skeletons
+    return raw, report, skeletons, file_shas
 
 
 def build_raw(root: str | Path, package: str) -> dict[str, list[str]]:
@@ -215,5 +227,5 @@ def build_raw(root: str | Path, package: str) -> dict[str, list[str]]:
 
     Returns just the raw edge dict (public contract, unchanged).
     """
-    raw, _report, _skeletons = build_with_report(root, package)
+    raw, _report, _skeletons, _file_shas = build_with_report(root, package)
     return raw

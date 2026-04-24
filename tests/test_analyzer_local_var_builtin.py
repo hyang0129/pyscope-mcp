@@ -35,7 +35,7 @@ def test_local_var_ann_assign_dict_get_is_accepted(tmp_path: Path) -> None:
             "    return d.get('x')\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert _accepted(report, "builtin_method_call") >= 1
     assert report["pattern_counts"].get("attr_chain_unresolved", 0) == 0
 
@@ -53,7 +53,7 @@ def test_local_var_param_path_mkdir_is_accepted(tmp_path: Path) -> None:
             "    p.mkdir()\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert _accepted(report, "pathlib_method_call") >= 1
     assert report["pattern_counts"].get("attr_chain_unresolved", 0) == 0
 
@@ -70,7 +70,7 @@ def test_local_var_dict_literal_assign_get_is_accepted(tmp_path: Path) -> None:
             "    return x.get('y')\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert _accepted(report, "builtin_method_call") >= 1
 
 
@@ -86,7 +86,7 @@ def test_local_var_list_literal_append_is_accepted(tmp_path: Path) -> None:
             "    items.append(1)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert _accepted(report, "builtin_method_call") >= 1
 
 
@@ -104,7 +104,7 @@ def test_local_var_path_call_exists_is_accepted(tmp_path: Path) -> None:
             "    return p.exists()\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert _accepted(report, "pathlib_method_call") >= 1
 
 
@@ -127,7 +127,7 @@ def test_fpg_factory_return_type_unknown_no_false_in_package_edge(tmp_path: Path
             "    return x.get('y')\n"
         ),
     })
-    raw, report, _skeletons = build_with_report(root, "pkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # No in-package callee should be emitted for x.get() — factory() does not
     # record a sentinel for x (it is an in-package Call, not a builtin literal/ctor).
     callees = raw.get("pkg.mod.f", [])
@@ -151,7 +151,7 @@ def test_fpg_for_loop_var_not_tracked_no_false_in_package_edge(tmp_path: Path) -
             "        p.mkdir()\n"
         ),
     })
-    raw, report, _skeletons = build_with_report(root, "pkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # f() emits no in-package edges — no callee of p.mkdir() should be in raw.
     callees = raw.get("pkg.mod.f", [])
     assert callees == [], f"Expected no in-package edges from f, got: {callees}"

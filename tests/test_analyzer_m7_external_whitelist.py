@@ -155,7 +155,7 @@ def test_pathlib_method_in_accepted_counts(tmp_path: Path) -> None:
             "    return cfg.read_text(encoding='utf-8')\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("pathlib_method_call", 0) >= 1
     patterns = {e["pattern"] for e in report["unresolved_calls"]}
@@ -171,7 +171,7 @@ def test_futures_method_in_accepted_counts(tmp_path: Path) -> None:
             "    return fut.result(timeout=10)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("futures_method_call", 0) >= 1
     patterns = {e["pattern"] for e in report["unresolved_calls"]}
@@ -191,7 +191,7 @@ def test_pydantic_super_init_routed_to_accepted(tmp_path: Path) -> None:
             "        super().__init__(**data)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("pydantic_method_call", 0) >= 1
     # super_unresolved for the BaseModel subclass init should not be recorded.
@@ -213,7 +213,7 @@ def test_pydantic_super_init_transitive_base(tmp_path: Path) -> None:
             "        super().__init__(**data)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("pydantic_method_call", 0) >= 1
 
@@ -227,7 +227,7 @@ def test_non_pydantic_super_init_stays_super_unresolved(tmp_path: Path) -> None:
             "        super().__init__()\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("pydantic_method_call", 0) == 0
 
 
@@ -243,7 +243,7 @@ def test_pydantic_method_in_accepted_counts(tmp_path: Path) -> None:
             "    return cfg.model_dump()\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("pydantic_method_call", 0) >= 1
     patterns = {e["pattern"] for e in report["unresolved_calls"]}
@@ -267,7 +267,7 @@ def test_user_class_submit_resolves_in_package_not_accepted(tmp_path: Path) -> N
             "        self.submit(item)\n"
         ),
     })
-    raw, report, _skeletons = build_with_report(root, "pkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # self.submit resolves to pkg.mod.MyQueue.submit (in-package)
     assert "pkg.mod.MyQueue.submit" in raw.get("pkg.mod.MyQueue.enqueue", [])
     # Nothing should be in futures_method_call accepted bucket for this package
@@ -286,6 +286,6 @@ def test_user_class_model_dump_resolves_in_package_not_accepted(tmp_path: Path) 
             "        return self.model_dump()\n"
         ),
     })
-    raw, report, _skeletons = build_with_report(root, "pkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert "pkg.mod.MySerializer.model_dump" in raw.get("pkg.mod.MySerializer.serialize", [])
     assert report["summary"]["accepted_counts"].get("pydantic_method_call", 0) == 0

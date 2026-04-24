@@ -3,15 +3,18 @@
 Covers:
 - CallGraphIndex.file_skeleton() query method
 - Skeleton extraction via _extract_skeletons() in the pipeline
-- Index round-trip (save/load) with skeletons (version 2)
-- Backward compatibility: version 1 indexes load with empty skeletons
+- Index round-trip (save/load) with skeletons (version 3)
+- SHA staleness detection: fresh / file_changed / file_not_found / file_not_in_index
+- Backward compatibility: version 1/2 indexes → index_format_incompatible
 - Truncation at 50 symbols
-- isError: true for unknown path
+- isError: true for unknown path (also stale: true, file_not_in_index)
 """
 
 from __future__ import annotations
 
 import ast
+import hashlib
+import json as _json
 import textwrap
 from pathlib import Path
 
@@ -25,9 +28,13 @@ from pyscope_mcp.analyzer.pipeline import _extract_skeletons, _first_def_line
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_index_with_skeletons(skeletons: dict) -> CallGraphIndex:
-    """Build a minimal CallGraphIndex pre-loaded with the given skeletons dict."""
-    return CallGraphIndex.from_raw("/tmp/test", {}, skeletons=skeletons)
+def _make_index_with_skeletons(skeletons: dict, file_shas: dict | None = None) -> CallGraphIndex:
+    """Build a minimal CallGraphIndex pre-loaded with the given skeletons dict.
+
+    Pass ``file_shas=None`` (the default) to simulate a pre-v3 index.
+    Pass ``file_shas={}`` (or a populated dict) to simulate a v3 index.
+    """
+    return CallGraphIndex.from_raw("/tmp/test", {}, skeletons=skeletons, file_shas=file_shas)
 
 
 def _parse(source: str) -> ast.Module:
@@ -158,32 +165,42 @@ def _make_symbol(fqn: str, kind: str, lineno: int) -> dict:
 
 
 def test_file_skeleton_returns_symbols() -> None:
+    """Happy path: symbols returned; stale is false when file_shas not set (pre-v3 behaviour
+    with file_shas=None triggers index_format_incompatible, so we use an empty file_shas
+    dict to get a fresh-ish result — actual disk check is covered by dedicated tests)."""
     symbols = [
         _make_symbol("pkg.mod.ClassA", "class", 1),
         _make_symbol("pkg.mod.ClassA.method_x", "method", 5),
         _make_symbol("pkg.mod.helper", "function", 10),
     ]
-    idx = _make_index_with_skeletons({"mod.py": symbols})
+    # Use a pre-v3 index (file_shas=None) just to verify the base shape still returns results.
+    idx = _make_index_with_skeletons({"mod.py": symbols}, file_shas=None)
     result = idx.file_skeleton("mod.py")
 
     assert result.get("isError") is None or result.get("isError") is False
     assert result["truncated"] is False
     assert result["total"] == 3
     assert len(result["results"]) == 3
+    # Pre-v3: stale=True with index_format_incompatible
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "index_format_incompatible"
 
 
 def test_file_skeleton_unknown_path_returns_error() -> None:
-    idx = _make_index_with_skeletons({"mod.py": []})
+    """Unknown path returns isError:true AND stale:true with reason file_not_in_index."""
+    idx = _make_index_with_skeletons({"mod.py": []}, file_shas={})
     result = idx.file_skeleton("nonexistent/file.py")
 
     assert result["isError"] is True
-    assert "rebuild" in result["message"].lower() or "build" in result["message"].lower()
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "file_not_in_index"
+    assert "build" in result["staleness_info"]["action"].lower()
 
 
 def test_file_skeleton_truncation_at_50() -> None:
     """When a file has >50 symbols, truncated=True and results are capped at 50."""
     symbols = [_make_symbol(f"pkg.mod.fn{i}", "function", i) for i in range(60)]
-    idx = _make_index_with_skeletons({"large.py": symbols})
+    idx = _make_index_with_skeletons({"large.py": symbols}, file_shas=None)
     result = idx.file_skeleton("large.py")
 
     assert result["truncated"] is True
@@ -194,7 +211,7 @@ def test_file_skeleton_truncation_at_50() -> None:
 def test_file_skeleton_exactly_50_not_truncated() -> None:
     """Exactly 50 symbols: truncated=False (boundary condition)."""
     symbols = [_make_symbol(f"pkg.mod.fn{i}", "function", i) for i in range(50)]
-    idx = _make_index_with_skeletons({"exact.py": symbols})
+    idx = _make_index_with_skeletons({"exact.py": symbols}, file_shas=None)
     result = idx.file_skeleton("exact.py")
 
     assert result["truncated"] is False
@@ -205,7 +222,7 @@ def test_file_skeleton_exactly_50_not_truncated() -> None:
 def test_file_skeleton_51_symbols_truncated() -> None:
     """51 symbols: truncated=True."""
     symbols = [_make_symbol(f"pkg.mod.fn{i}", "function", i) for i in range(51)]
-    idx = _make_index_with_skeletons({"mod51.py": symbols})
+    idx = _make_index_with_skeletons({"mod51.py": symbols}, file_shas=None)
     result = idx.file_skeleton("mod51.py")
 
     assert result["truncated"] is True
@@ -215,7 +232,7 @@ def test_file_skeleton_51_symbols_truncated() -> None:
 
 def test_file_skeleton_empty_file() -> None:
     """Empty file (no symbols) returns results=[], truncated=False, total=0."""
-    idx = _make_index_with_skeletons({"empty.py": []})
+    idx = _make_index_with_skeletons({"empty.py": []}, file_shas=None)
     result = idx.file_skeleton("empty.py")
 
     assert result["truncated"] is False
@@ -245,24 +262,169 @@ def test_save_load_roundtrip_with_skeletons(tmp_path: Path) -> None:
     assert result["truncated"] is False
 
 
-def test_save_version_is_2(tmp_path: Path) -> None:
-    """Saved index must have version=2."""
-    import json as _json
+def test_save_version_is_3(tmp_path: Path) -> None:
+    """Saved index must have version=3 (bumped from 2 in this release)."""
     idx = CallGraphIndex.from_raw("/tmp/test", {})
     out = tmp_path / "index.json"
     idx.save(out)
     payload = _json.loads(out.read_text())
-    assert payload["version"] == 2
+    assert payload["version"] == 3
+
+
+def test_save_includes_file_shas(tmp_path: Path) -> None:
+    """Saved index includes file_shas key."""
+    shas = {"mod.py": "abc123"}
+    idx = CallGraphIndex.from_raw("/tmp/test", {}, file_shas=shas)
+    out = tmp_path / "index.json"
+    idx.save(out)
+    payload = _json.loads(out.read_text())
+    assert "file_shas" in payload
+    assert payload["file_shas"] == shas
+
+
+def test_save_load_roundtrip_file_shas(tmp_path: Path) -> None:
+    """file_shas survive save() → load() intact."""
+    shas = {"a.py": "deadbeef", "b.py": "cafebabe"}
+    idx = CallGraphIndex.from_raw("/tmp/test", {}, file_shas=shas)
+    out = tmp_path / "index.json"
+    idx.save(out)
+    loaded = CallGraphIndex.load(out)
+    assert loaded.file_shas == shas
 
 
 def test_load_version_1_backward_compat(tmp_path: Path) -> None:
-    """Version 1 index loads successfully with empty skeletons dict."""
-    import json as _json
-    payload = {"version": 1, "root": "/tmp/test", "raw": {}}
+    """Version 1 index loads successfully; file_shas is None (pre-v3 sentinel)."""
+    payload = {"version": 1, "root": "/tmp/test", "raw": {}, "skeletons": {"any.py": []}}
     out = tmp_path / "v1_index.json"
     out.write_text(_json.dumps(payload))
 
     loaded = CallGraphIndex.load(out)
-    assert loaded.skeletons == {}
+    assert loaded.skeletons == {"any.py": []}
+    assert loaded.file_shas is None
+    # Querying any known path on a pre-v3 index → stale: index_format_incompatible
     result = loaded.file_skeleton("any.py")
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "index_format_incompatible"
+
+
+def test_load_version_2_backward_compat(tmp_path: Path) -> None:
+    """Version 2 index loads successfully; file_shas is None (pre-v3 sentinel)."""
+    payload = {"version": 2, "root": "/tmp/test", "raw": {}, "skeletons": {}}
+    out = tmp_path / "v2_index.json"
+    out.write_text(_json.dumps(payload))
+
+    loaded = CallGraphIndex.load(out)
+    assert loaded.file_shas is None
+
+
+def test_load_version_future_raises(tmp_path: Path) -> None:
+    """Version > 3 raises ValueError (unknown format)."""
+    payload = {"version": 4, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
+    out = tmp_path / "v4_index.json"
+    out.write_text(_json.dumps(payload))
+
+    with pytest.raises(ValueError, match="unsupported index version: 4"):
+        CallGraphIndex.load(out)
+
+
+# ---------------------------------------------------------------------------
+# SHA staleness scenarios (unit tests using tmp_path for live files)
+# ---------------------------------------------------------------------------
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_file_skeleton_stale_sha_match(tmp_path: Path) -> None:
+    """Scenario A: v3 index, file on disk matches stored SHA → stale: false."""
+    content = b"def foo(): pass\n"
+    live_file = tmp_path / "mod.py"
+    live_file.write_bytes(content)
+
+    symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
+    shas = {"mod.py": _sha256(content)}
+    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+
+    result = idx.file_skeleton("mod.py")
+    assert result["stale"] is False
+    assert "staleness_info" not in result or result.get("staleness_info") is None
+    assert len(result["results"]) == 1
+
+
+def test_file_skeleton_stale_sha_mismatch(tmp_path: Path) -> None:
+    """Scenario B: v3 index, file on disk has different content → stale: true, file_changed."""
+    original = b"def foo(): pass\n"
+    live_file = tmp_path / "mod.py"
+    live_file.write_bytes(b"def foo(): return 42\n")  # different content
+
+    symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
+    shas = {"mod.py": _sha256(original)}  # stored hash is of original content
+    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+
+    result = idx.file_skeleton("mod.py")
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "file_changed"
+    assert "build" in result["staleness_info"]["action"].lower()
+    # Results are still returned
+    assert len(result["results"]) == 1
+
+
+def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
+    """Scenario C: v3 index, file absent from disk → stale: true, file_not_found."""
+    symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
+    shas = {"mod.py": "somehex"}
+    # Don't create the file on disk
+    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+
+    result = idx.file_skeleton("mod.py")
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "file_not_found"
+    # Results still returned (from index)
+    assert len(result["results"]) == 1
+
+
+def test_file_skeleton_stale_file_not_in_index(tmp_path: Path) -> None:
+    """Scenario D: v3 index, path not in skeletons → isError: true, stale: true, file_not_in_index."""
+    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={}, file_shas={})
+
+    result = idx.file_skeleton("new_mod.py")
     assert result["isError"] is True
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "file_not_in_index"
+
+
+def test_file_skeleton_stale_pre_v3_index(tmp_path: Path) -> None:
+    """Scenario E: pre-v3 index (file_shas=None) → stale: true, index_format_incompatible."""
+    symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
+    # file_shas=None simulates loading a v1 or v2 index
+    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=None)
+
+    result = idx.file_skeleton("mod.py")
+    assert result["stale"] is True
+    assert result["staleness_info"]["reason"] == "index_format_incompatible"
+    # Results are still returned
+    assert len(result["results"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# build_with_report computes file_shas
+# ---------------------------------------------------------------------------
+
+def test_build_stores_file_shas(tmp_path: Path) -> None:
+    """Integration: build_with_report returns file_shas; hashes match live file bytes."""
+    from pyscope_mcp.analyzer.pipeline import build_with_report
+
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("# init\n")
+    (pkg / "core.py").write_text("def foo(): pass\n")
+
+    _raw, _report, _skeletons, file_shas = build_with_report(str(tmp_path), package="mypkg")
+
+    assert isinstance(file_shas, dict)
+    assert len(file_shas) > 0
+
+    # Verify each hash matches the live file bytes
+    for rel_path, stored_sha in file_shas.items():
+        live_bytes = (tmp_path / rel_path).read_bytes()
+        assert _sha256(live_bytes) == stored_sha, f"SHA mismatch for {rel_path}"
