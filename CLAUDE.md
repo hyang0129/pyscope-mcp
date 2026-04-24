@@ -6,6 +6,17 @@ A standalone pip-installable MCP server. Exposes function- and module-level call
 
 Package name on PyPI: `pyscope-mcp`. Import path: `pyscope_mcp`. Console script: `pyscope-mcp`.
 
+## Governing document — read before non-trivial changes
+
+[CONSTITUTION.md](CONSTITUTION.md) defines the non-negotiables this project is checked against. Any PR that adds features, changes the graph surface, or touches the serve/build split must keep all four laws and pass the Review Heuristic at the bottom of that file. In one-line summary:
+
+1. Never mislead the consumer — no uncertain edges, no silent truncation.
+2. Minimal startup; the serve path stays thin.
+3. Git-in-sync graph is the zero-friction default; drift is cheaply detectable.
+4. Graph update ≤60 s on standard PRs.
+
+When the conventions below appear to conflict with the constitution, the constitution wins. If that happens, flag it — the convention is out of date.
+
 ## Current status
 
 Scaffold only. The query layer, index format, CLI, MCP server, and tests are all in place. The analyzer — the thing that turns source code into the raw `{caller_fqn: [callee_fqn, ...]}` dict — is **not implemented**. `pyscope_mcp/analyzer.py::build_raw` raises `NotImplementedError`.

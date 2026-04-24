@@ -1,6 +1,6 @@
 # Graph navigation features: what to build, what to skip
 
-Companion to [prior-art.md](prior-art.md) and [constitution.md](constitution.md).
+Companion to [prior-art.md](prior-art.md) and [CONSTITUTION.md](../CONSTITUTION.md).
 Prior-art surveyed what other code-graph MCPs ship; the constitution set hard
 constraints on what we're willing to ship. This document is the intersection:
 given those constraints, which navigation features actually pay for themselves,
