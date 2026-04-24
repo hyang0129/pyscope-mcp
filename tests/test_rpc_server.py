@@ -178,8 +178,8 @@ async def test_golden_handshake(server: RpcServer, tmp_index: Path):
     assert list_resp["id"] == 2
     tools = list_resp["result"]["tools"]
     tool_names = {t["name"] for t in tools}
-    assert tool_names == {"stats", "reload", "callers_of", "callees_of", "module_callers", "module_callees", "search"}
-    assert len(tools) == 7
+    assert tool_names == {"stats", "reload", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton"}
+    assert len(tools) == 8
 
 
 @pytest.mark.asyncio
@@ -844,7 +844,7 @@ async def test_tools_list_ignores_cursor_and_omits_next_cursor(server: RpcServer
     result = responses[0]["result"]
     assert "tools" in result
     assert "nextCursor" not in result
-    assert len(result["tools"]) == 7
+    assert len(result["tools"]) == 8
 
 
 @pytest.mark.asyncio

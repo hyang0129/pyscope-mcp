@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -95,7 +96,7 @@ def test_stdio_multiple_requests(index_path: Path) -> None:
         r2 = _recv(proc)
         assert r2["id"] == 2
         tools = r2["result"]["tools"]
-        assert len(tools) == 7
+        assert len(tools) == 8
         assert all("name" in t and "inputSchema" in t for t in tools)
 
         # Third request — ping.
@@ -276,6 +277,128 @@ def test_print_in_handler_goes_to_stderr(index_path: Path, tmp_path: Path) -> No
     assert "oops from handler" in stderr, f"print did not reach stderr; stderr={stderr!r}"
     # And critically: stdout must not contain the raw print text.
     assert b"oops from handler" not in stdout_rest
+
+
+def test_file_skeleton_build_serve_e2e(tmp_path: Path) -> None:
+    """Full pipeline: build writes skeletons → serve loads them → file_skeleton RPC returns correct symbols.
+
+    The unit tests exercise extraction and querying in-memory. This test is the only
+    one that catches seam bugs: wrong tuple element unpacked by CLI, wrong key written
+    by save(), silent empty-skeleton on load(), or malformed dispatch response.
+    """
+    # 1. Synthetic package with a predictable structure
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "core.py").write_text(textwrap.dedent("""\
+        def standalone(x: int) -> str:
+            def _inner():
+                pass
+            return str(x)
+
+        class MyClass:
+            def method_a(self) -> None:
+                pass
+
+            async def method_b(self, val: int) -> str:
+                return str(val)
+    """))
+
+    # 2. Run `pyscope-mcp build` as a subprocess — exercises the 3-tuple unpack and version-2 write
+    index_file = tmp_path / ".pyscope-mcp" / "index.json"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+    build_result = subprocess.run(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "build",
+            "--root", str(tmp_path),
+            "--package", "mypkg",
+            "--output", str(index_file),
+        ],
+        capture_output=True, env=env,
+    )
+    assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
+
+    # 3. Index is version 2 and contains skeletons for core.py
+    payload = json.loads(index_file.read_text())
+    assert payload["version"] == 2
+    rel = "mypkg/core.py"
+    assert rel in payload["skeletons"], (
+        f"expected '{rel}' in skeletons; got keys: {list(payload['skeletons'])}"
+    )
+    saved_symbols = payload["skeletons"][rel]
+    saved_fqns = [s["fqn"] for s in saved_symbols]
+    assert "mypkg.core.standalone" in saved_fqns
+    assert "mypkg.core.MyClass" in saved_fqns
+    assert "mypkg.core.MyClass.method_a" in saved_fqns
+    assert "mypkg.core.MyClass.method_b" in saved_fqns
+    assert not any("_inner" in fqn for fqn in saved_fqns), "nested function must be excluded"
+    assert [s["lineno"] for s in saved_symbols] == sorted(s["lineno"] for s in saved_symbols)
+
+    # 4. Serve the index and call file_skeleton over the MCP wire
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "serve",
+            "--root", str(tmp_path),
+            "--index", str(index_file),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-skeleton", "version": "0"},
+            },
+        })
+        r = _recv(proc)
+        assert r["id"] == 1
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # 5. Happy path: known file returns correct symbols
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "file_skeleton", "arguments": {"path": rel}},
+        })
+        r = _recv(proc)
+        assert r["id"] == 2
+        assert "error" not in r, f"unexpected JSON-RPC error: {r}"
+        assert r["result"].get("isError") is not True
+
+        body = json.loads(r["result"]["content"][0]["text"])
+        assert body["truncated"] is False
+        assert body["total"] == len(saved_symbols)
+        result_fqns = [s["fqn"] for s in body["results"]]
+        assert "mypkg.core.MyClass.method_b" in result_fqns
+        assert not any("_inner" in fqn for fqn in result_fqns)
+
+        method_b = next(s for s in body["results"] if s["fqn"].endswith("method_b"))
+        assert method_b["kind"] == "method"
+        assert method_b["signature"].startswith("async def method_b")
+
+        # 6. Unknown path returns isError via the wire — not a JSON-RPC error
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "file_skeleton", "arguments": {"path": "does/not/exist.py"}},
+        })
+        r = _recv(proc)
+        assert r["id"] == 3
+        assert "error" not in r
+        assert r["result"]["isError"] is True
+
+        # 7. Clean shutdown
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r = _recv(proc)
+        assert r == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
 
 
 def test_shutdown_then_eof_exits_zero(index_path: Path) -> None:

@@ -50,7 +50,7 @@ def test_import_alias_sys_exit_is_not_attr_chain_unresolved(tmp_path: Path) -> N
             "    sys_module.exit(0)\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     unresolved = report["pattern_counts"]
     assert "attr_chain_unresolved" not in unresolved or unresolved.get("attr_chain_unresolved", 0) == 0, (
         f"sys_module.exit(0) should not be attr_chain_unresolved; got {unresolved}"
@@ -69,7 +69,7 @@ def test_import_alias_os_path_join_is_not_attr_chain_unresolved(tmp_path: Path) 
             "    return op.join(x, y)\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     unresolved = report["pattern_counts"]
     assert "attr_chain_unresolved" not in unresolved or unresolved.get("attr_chain_unresolved", 0) == 0, (
         f"op.join should not be attr_chain_unresolved; got {unresolved}"
@@ -88,7 +88,7 @@ def test_import_alias_json_loads_is_not_attr_chain_unresolved(tmp_path: Path) ->
             "    return j.loads(s)\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     unresolved = report["pattern_counts"]
     assert "attr_chain_unresolved" not in unresolved or unresolved.get("attr_chain_unresolved", 0) == 0, (
         f"j.loads should not be attr_chain_unresolved; got {unresolved}"
@@ -113,7 +113,7 @@ def test_parameter_injection_sys_module_exit_is_accepted(tmp_path: Path) -> None
             "        sys_module.exit(2)\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     accepted = report["summary"]["accepted_counts"]
     pattern_counts = report["pattern_counts"]
     assert accepted.get("stdlib_method_call", 0) >= 1, (
@@ -134,7 +134,7 @@ def test_parameter_injection_os_lib_is_accepted(tmp_path: Path) -> None:
             "    return os_lib.getcwd()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     accepted = report["summary"]["accepted_counts"]
     assert accepted.get("stdlib_method_call", 0) >= 1, (
         f"os_lib.getcwd() should be accepted as stdlib_method_call; accepted={accepted}"
@@ -155,7 +155,7 @@ def test_fp_guard_non_stdlib_stem_is_attr_chain_unresolved(tmp_path: Path) -> No
             "    myapp_module.exit()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     accepted = report["summary"]["accepted_counts"]
     pattern_counts = report["pattern_counts"]
     assert accepted.get("stdlib_method_call", 0) == 0, (

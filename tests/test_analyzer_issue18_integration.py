@@ -76,7 +76,7 @@ def test_all_four_handlers_combined(tmp_path: Path) -> None:
             "        sys_mod.exit(code)\n"
         ),
     })
-    raw, report = build_with_report(root, "pkg")
+    raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
 
     # H2: agent.run() from union annotation
@@ -148,7 +148,7 @@ def test_h1_boto3_and_h2_union_no_false_positives(tmp_path: Path) -> None:
             "    s3.put_object(Bucket='b', Key='k', Body=b'v')\n"
         ),
     })
-    raw, report = build_with_report(root, "pkg")
+    raw, report, _skeletons = build_with_report(root, "pkg")
 
     # H2: worker.process() resolved in-package
     assert "pkg.worker.DataWorker.process" in raw.get("pkg.runner.run", []), (

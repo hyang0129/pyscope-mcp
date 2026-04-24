@@ -90,7 +90,7 @@ def test_dunder_new_bare_call_not_unresolved(tmp_path: Path) -> None:
             "    C.__new__(C)\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
 
     # Should NOT appear in unresolved_calls
     unresolved_snippets = {e["snippet"] for e in report.get("unresolved_calls", [])}

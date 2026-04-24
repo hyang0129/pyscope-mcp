@@ -45,7 +45,7 @@ def test_googleapi_three_segment_chain_accepted(tmp_path: Path) -> None:
             "    result = service.channels().list(part='snippet')\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
     # Both service.channels() (2-part, handled by existing path) and
     # service.channels().list(...) (3-part chain) should be accepted.
@@ -69,7 +69,7 @@ def test_googleapi_four_segment_chain_accepted(tmp_path: Path) -> None:
             "    service.channels().list(part='snippet').execute()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
     # service.channels() → accepted (2-part, existing handler)
     # service.channels().list(...) → accepted (3-part, new handler)
@@ -94,7 +94,7 @@ def test_googleapi_videos_insert_chain_accepted(tmp_path: Path) -> None:
             "    youtube.videos().insert(part='snippet', body={}).execute()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("googleapi_method_call", 0) >= 3, (
         f"Expected >=3 googleapi_method_call; got: {summary['accepted_counts']}"
@@ -115,7 +115,7 @@ def test_googleapi_module_level_service_chain(tmp_path: Path) -> None:
             "    _service.channels().list(part='snippet').execute()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
     # The inline chain calls (channels().list().execute()) should be accepted.
     assert summary["accepted_counts"].get("googleapi_method_call", 0) >= 1, (
@@ -139,7 +139,7 @@ def test_httpx_chain_not_self_returning(tmp_path: Path) -> None:
             "    client.post('http://example.com').raise_for_status()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     # httpx.Client is NOT in EXTERNAL_SELF_RETURNING, so chain walker must not fire.
     # client.post(...) is still accepted via the 2-part handler.
     # client.post(...).raise_for_status() is an unknown chain — that's fine, it
@@ -170,7 +170,7 @@ def test_boto3_chain_not_self_returning(tmp_path: Path) -> None:
             "    client.put_object(Bucket='b', Key='k', Body=b'data').something()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     summary = report["summary"]
     # Chain walker must not fire for boto3.client (not self-returning).
     # The googleapi bucket must remain at 0.
@@ -191,7 +191,7 @@ def test_unknown_root_var_not_accepted(tmp_path: Path) -> None:
             "    unknown_service.channels().list(part='snippet').execute()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("googleapi_method_call", 0) == 0, (
         "Unknown root var should not produce googleapi_method_call"
     )
@@ -216,7 +216,7 @@ def test_inpackage_class_chain_not_intercepted(tmp_path: Path) -> None:
             "    svc.channels()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     # svc.channels() should be resolved as an in-package call, not googleapi_method_call.
     assert report["summary"]["accepted_counts"].get("googleapi_method_call", 0) == 0
     # Verify it resolved in-package.
@@ -238,6 +238,6 @@ def test_self_root_chain_not_intercepted(tmp_path: Path) -> None:
             "        self._build().run()\n"
         ),
     })
-    _raw, report = build_with_report(root, "pkg")
+    _raw, report, _skeletons = build_with_report(root, "pkg")
     # Must not accept via googleapi chain walker.
     assert report["summary"]["accepted_counts"].get("googleapi_method_call", 0) == 0

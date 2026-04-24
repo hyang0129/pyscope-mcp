@@ -3,6 +3,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypedDict
+
+
+class SymbolSummary(TypedDict):
+    fqn: str
+    kind: str  # "function" | "class" | "method"
+    signature: str
+    lineno: int
+
+
+_SKELETON_CAP = 50
 
 
 class _DiGraph:
@@ -106,15 +117,24 @@ class CallGraphIndex:
     Graphs are derived from `raw` on construction and on `load`. The backend
     that populates `raw` from source code lives in pyscope_mcp.analyzer
     (not yet implemented — see CLAUDE.md for the rewrite plan).
+
+    ``skeletons`` maps relative file paths → pre-computed lists of SymbolSummary
+    dicts, populated during ``pyscope-mcp build`` (index version 2+).
     """
 
     root: Path
     function_graph: _DiGraph = field(default_factory=_DiGraph)
     module_graph: _DiGraph = field(default_factory=_DiGraph)
     raw: dict[str, list[str]] = field(default_factory=dict)
+    skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
 
     @classmethod
-    def from_raw(cls, root: str | Path, raw: dict[str, list[str]]) -> "CallGraphIndex":
+    def from_raw(
+        cls,
+        root: str | Path,
+        raw: dict[str, list[str]],
+        skeletons: dict[str, list[SymbolSummary]] | None = None,
+    ) -> "CallGraphIndex":
         root = Path(root).resolve()
         fg = _DiGraph()
         mg = _DiGraph()
@@ -127,15 +147,22 @@ class CallGraphIndex:
                 tm = _module_of(callee)
                 if cm != tm:
                     mg.add_edge(cm, tm)
-        return cls(root=root, function_graph=fg, module_graph=mg, raw=raw)
+        return cls(
+            root=root,
+            function_graph=fg,
+            module_graph=mg,
+            raw=raw,
+            skeletons=skeletons or {},
+        )
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
+        payload: dict = {
+            "version": 2,
             "root": str(self.root),
             "raw": self.raw,
+            "skeletons": self.skeletons,
         }
         path.write_text(json.dumps(payload))
         return path
@@ -144,9 +171,38 @@ class CallGraphIndex:
     def load(cls, path: str | Path) -> "CallGraphIndex":
         path = Path(path)
         payload = json.loads(path.read_text())
-        if payload.get("version") != 1:
-            raise ValueError(f"unsupported index version: {payload.get('version')}")
-        return cls.from_raw(Path(payload["root"]), payload["raw"])
+        version = payload.get("version")
+        if version not in (1, 2):
+            raise ValueError(f"unsupported index version: {version}")
+        skeletons: dict[str, list[SymbolSummary]] = payload.get("skeletons", {})
+        return cls.from_raw(Path(payload["root"]), payload["raw"], skeletons=skeletons)
+
+    def file_skeleton(self, path: str, cap: int = _SKELETON_CAP) -> dict:
+        """Return a compact symbol list for the given relative file path.
+
+        Returns a dict with:
+          - ``results``: list of SymbolSummary dicts sorted by lineno (capped at *cap*)
+          - ``truncated``: True when the full symbol count exceeds *cap*
+          - ``total``: total number of symbols before capping
+
+        If the path is not in the index, returns an error dict with ``isError: True``.
+        """
+        if path not in self.skeletons:
+            return {
+                "isError": True,
+                "message": (
+                    f"File '{path}' is not in the index. "
+                    "Run 'pyscope-mcp build' and then 'reload' to update the index."
+                ),
+            }
+        symbols = self.skeletons[path]
+        total = len(symbols)
+        truncated = total > cap
+        return {
+            "results": symbols[:cap],
+            "truncated": truncated,
+            "total": total,
+        }
 
     def callers_of(self, fqn: str, depth: int = 1) -> list[str]:
         return _bfs(self.function_graph.reverse(copy=False), fqn, depth)
