@@ -96,7 +96,7 @@ def test_stdio_multiple_requests(index_path: Path) -> None:
         r2 = _recv(proc)
         assert r2["id"] == 2
         tools = r2["result"]["tools"]
-        assert len(tools) == 8
+        assert len(tools) == 9
         assert all("name" in t and "inputSchema" in t for t in tools)
 
         # Third request — ping.

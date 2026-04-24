@@ -67,7 +67,11 @@ _TOOL_LIST = [
     },
     {
         "name": "callers_of",
-        "description": "List functions that (transitively, up to depth) call the given function.",
+        "description": (
+            "List functions that (transitively, up to depth) call the given function. "
+            "Results are capped at 50; when the cap triggers, `truncated` is true. "
+            "Returns {results: [...], truncated: bool}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -80,7 +84,11 @@ _TOOL_LIST = [
     },
     {
         "name": "callees_of",
-        "description": "List functions (transitively, up to depth) called by the given function.",
+        "description": (
+            "List functions (transitively, up to depth) called by the given function. "
+            "Results are capped at 50; when the cap triggers, `truncated` is true. "
+            "Returns {results: [...], truncated: bool}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -184,6 +192,46 @@ _TOOL_LIST = [
                 },
             },
             "required": ["path"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
+    {
+        "name": "neighborhood",
+        "description": (
+            "Return a bounded bidirectional subgraph around a symbol — callers and callees "
+            "together, ranked by proximity (depth) and degree, truncated to a declared token "
+            "budget. "
+            "Edges are ranked depth-first with degree tiebreak (deterministic). "
+            "The result always fits within token_budget * 4 characters. "
+            "When the budget is hit, `truncated` is true, `depth_truncated` indicates the first "
+            "level where dropping started, and `depth_full` indicates the deepest level with "
+            "complete data. "
+            "Default token_budget=1000. "
+            "Returns {symbol, depth_full, depth_truncated?, edges: [[caller, callee], ...], "
+            "truncated: bool, token_budget_used: int}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {
+                    "type": "string",
+                    "description": "Fully-qualified name of the target symbol, e.g. pkg.mod.func",
+                },
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 2,
+                    "description": "Maximum hop depth in each direction (default: 2)",
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1000,
+                    "description": "Maximum tokens to return (4 chars/token; default: 1000)",
+                },
+            },
+            "required": ["symbol"],
         },
         "annotations": {"readOnlyHint": True, "idempotentHint": True},
     },
@@ -308,6 +356,14 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
             # branch on machine-readable staleness fields, not just the message string.
             return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
         return _text(result)
+
+    if name == "neighborhood":
+        symbol = arguments.get("symbol")
+        if not symbol:
+            return _error_result("neighborhood requires 'symbol'")
+        depth = int(arguments.get("depth", 2))
+        token_budget = int(arguments.get("token_budget", 1000))
+        return _text(idx.neighborhood(symbol, depth, token_budget))
 
     # Should never reach here — guarded by _TOOL_NAMES check above
     return _error_result(f"unknown tool: {name!r}")

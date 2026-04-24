@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
+
+from pyscope_mcp.types import (
+    CalleesResult,
+    CallersResult,
+    NeighborhoodResult,
+    SearchResult,
+    StatsResult,
+)
 
 
 class SymbolSummary(TypedDict):
@@ -280,11 +289,174 @@ class CallGraphIndex:
         base_result["stale"] = False
         return base_result
 
-    def callers_of(self, fqn: str, depth: int = 1) -> list[str]:
-        return _bfs(self.function_graph.reverse(copy=False), fqn, depth)
+    _CALLERS_CALLEES_CAP = 50
 
-    def callees_of(self, fqn: str, depth: int = 1) -> list[str]:
-        return _bfs(self.function_graph, fqn, depth)
+    def callers_of(self, fqn: str, depth: int = 1) -> CallersResult:
+        """Return functions that (transitively, up to depth) call *fqn*.
+
+        Results are capped at 50; ``truncated`` signals when the cap fires.
+        """
+        all_results = _bfs(self.function_graph.reverse(copy=False), fqn, depth)
+        truncated = len(all_results) > self._CALLERS_CALLEES_CAP
+        return CallersResult(
+            results=all_results[: self._CALLERS_CALLEES_CAP],
+            truncated=truncated,
+        )
+
+    def callees_of(self, fqn: str, depth: int = 1) -> CalleesResult:
+        """Return functions (transitively, up to depth) called by *fqn*.
+
+        Results are capped at 50; ``truncated`` signals when the cap fires.
+        """
+        all_results = _bfs(self.function_graph, fqn, depth)
+        truncated = len(all_results) > self._CALLERS_CALLEES_CAP
+        return CalleesResult(
+            results=all_results[: self._CALLERS_CALLEES_CAP],
+            truncated=truncated,
+        )
+
+    def neighborhood(
+        self,
+        symbol: str,
+        depth: int = 2,
+        token_budget: int = 1000,
+    ) -> NeighborhoodResult:
+        """Return a bounded bidirectional subgraph around *symbol*.
+
+        BFS outward (both callers and callees) up to *depth* hops.  Candidate
+        edges are ranked by (hop_depth, -degree) — depth-first with degree
+        tiebreak — then truncated to fit within *token_budget* (4 chars/token
+        estimate).
+
+        Response keys:
+          - ``symbol``: the queried FQN
+          - ``depth_full``: deepest level with all edges intact (no drops)
+          - ``depth_truncated``: first level where dropping started (only when ``truncated=True``)
+          - ``edges``: list of ``[caller, callee]`` pairs
+          - ``truncated``: True when the budget was hit
+          - ``token_budget_used``: estimated tokens consumed (chars / 4)
+
+        ``depth_full`` reflects the actual graph depth, not the declared *depth*
+        parameter (if the graph is shallower, ``depth_full`` mirrors reality).
+        """
+        fg = self.function_graph
+        rev_fg = fg.reverse(copy=False)
+
+        # ------------------------------------------------------------------
+        # Phase 1: bidirectional BFS — collect (caller, callee, hop_depth)
+        # ------------------------------------------------------------------
+        # We collect all edges reachable within `depth` hops from symbol in
+        # either direction.  Each edge is annotated with the minimum hop_depth
+        # at which either endpoint was first encountered from symbol.
+
+        # BFS state: maps node → min hop distance from symbol
+        node_depth: dict[str, int] = {symbol: 0}
+        frontier: deque[tuple[str, int]] = deque([(symbol, 0)])
+
+        # Edge deduplication and depth tracking: maps (caller, callee) → min hop_depth
+        edge_depths: dict[tuple[str, str], int] = {}  # min hop_depth for edge
+
+        while frontier:
+            node, d = frontier.popleft()
+            if d >= depth:
+                continue
+            next_d = d + 1
+
+            # Callees direction: node → callee
+            for callee in fg.successors(node):
+                edge = (node, callee)
+                if edge not in edge_depths or edge_depths[edge] > next_d:
+                    edge_depths[edge] = next_d
+                if callee not in node_depth:
+                    node_depth[callee] = next_d
+                    frontier.append((callee, next_d))
+
+            # Callers direction: caller → node
+            for caller in rev_fg.successors(node):
+                edge = (caller, node)
+                if edge not in edge_depths or edge_depths[edge] > next_d:
+                    edge_depths[edge] = next_d
+                if caller not in node_depth:
+                    node_depth[caller] = next_d
+                    frontier.append((caller, next_d))
+
+        if not edge_depths:
+            # Symbol not in graph or isolated node — return minimal result
+            return NeighborhoodResult(
+                symbol=symbol,
+                depth_full=0,
+                edges=[],
+                truncated=False,
+                token_budget_used=0,
+            )
+
+        # ------------------------------------------------------------------
+        # Phase 2: rank edges deterministically
+        # Ranking key: (hop_depth ASC, -degree DESC, caller ASC, callee ASC)
+        # degree = out-degree + in-degree of the caller node in the full graph
+        # ------------------------------------------------------------------
+        # Precompute degrees for all unique caller nodes to avoid O(E×degree)
+        # redundant traversals during sort.
+        caller_nodes = {e[0] for e in edge_depths}
+        degree_cache: dict[str, int] = {
+            n: sum(1 for _ in fg.successors(n)) + sum(1 for _ in rev_fg.successors(n))
+            for n in caller_nodes
+        }
+
+        ranked_edges = sorted(
+            edge_depths.keys(),
+            key=lambda e: (edge_depths[e], -degree_cache.get(e[0], 0), e[0], e[1]),
+        )
+
+        # ------------------------------------------------------------------
+        # Phase 3: truncate to token_budget (4 chars/token estimate)
+        # ------------------------------------------------------------------
+        char_budget = token_budget * 4
+        kept_edges: list[tuple[str, str]] = []
+        chars_used = 0
+        truncated = False
+        depth_truncated: int | None = None
+
+        # Track per-depth completeness
+        depth_complete_through = 0  # deepest level with ALL edges kept
+        depth_edges_by_level: dict[int, list[tuple[str, str]]] = {}
+        for edge in ranked_edges:
+            d = edge_depths[edge]
+            depth_edges_by_level.setdefault(d, []).append(edge)
+
+        for level in sorted(depth_edges_by_level):
+            level_edges = depth_edges_by_level[level]
+            for edge in level_edges:
+                edge_repr = json.dumps([edge[0], edge[1]])
+                edge_chars = len(edge_repr) + 2  # +2 for comma + newline approx
+                if chars_used + edge_chars > char_budget:
+                    truncated = True
+                    if depth_truncated is None:
+                        depth_truncated = level
+                    # Skip this edge — budget exhausted
+                    continue
+                kept_edges.append(edge)
+                chars_used += edge_chars
+            if not truncated:
+                depth_complete_through = level
+
+        # depth_full = deepest level where ALL edges were kept intact
+        depth_full = depth_complete_through
+
+        # ------------------------------------------------------------------
+        # Phase 4: assemble result
+        # ------------------------------------------------------------------
+        result = NeighborhoodResult(
+            symbol=symbol,
+            depth_full=depth_full,
+            edges=[[c, e] for c, e in kept_edges],
+            truncated=truncated,
+            token_budget_used=chars_used // 4,
+        )
+        if truncated and depth_truncated is not None:
+            result["depth_truncated"] = depth_truncated
+
+        return result
 
     def module_callers(self, module: str, depth: int = 1) -> dict[str, object]:
         """Return callers of all modules whose FQN starts with *module* (prefix query).
@@ -306,7 +478,7 @@ class CallGraphIndex:
         """
         return _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
 
-    def search(self, substring: str, limit: int = 50) -> dict[str, object]:
+    def search(self, substring: str, limit: int = 50) -> SearchResult:
         """Substring search over known fully-qualified function names.
 
         Returns a dict with:
@@ -317,19 +489,19 @@ class CallGraphIndex:
         s = substring.lower()
         all_matches = [n for n in self.function_graph.nodes if s in n.lower()]
         total = len(all_matches)
-        return {
-            "results": all_matches[:limit],
-            "truncated": total > limit,
-            "total_matched": total,
-        }
+        return SearchResult(
+            results=all_matches[:limit],
+            truncated=total > limit,
+            total_matched=total,
+        )
 
-    def stats(self) -> dict[str, int]:
-        return {
-            "functions": self.function_graph.number_of_nodes(),
-            "function_edges": self.function_graph.number_of_edges(),
-            "modules": self.module_graph.number_of_nodes(),
-            "module_edges": self.module_graph.number_of_edges(),
-        }
+    def stats(self) -> StatsResult:
+        return StatsResult(
+            functions=self.function_graph.number_of_nodes(),
+            function_edges=self.function_graph.number_of_edges(),
+            modules=self.module_graph.number_of_nodes(),
+            module_edges=self.module_graph.number_of_edges(),
+        )
 
 
 _MODULE_BFS_CAP = 50
