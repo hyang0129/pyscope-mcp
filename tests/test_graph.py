@@ -53,7 +53,11 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
 
     loaded = CallGraphIndex.load(out)
     assert loaded.stats() == idx.stats()
-    assert loaded.search("helper") == idx.search("helper")
+    # Compare only the query results (not staleness — the original idx has file_shas=None
+    # which produces a pre-v3 stale signal, while the saved+loaded index is v3 with no
+    # stored hashes and the symbol files aren't on disk, so staleness differs by design).
+    assert loaded.search("helper")["results"] == idx.search("helper")["results"]
+    assert loaded.search("helper")["truncated"] == idx.search("helper")["truncated"]
 
 
 def _prefix_raw() -> dict[str, list[str]]:
@@ -110,14 +114,18 @@ def test_module_callers_no_match() -> None:
     """A prefix matching no module nodes returns empty results, no error."""
     idx = CallGraphIndex.from_raw("/tmp/sample", _prefix_raw())
     result = idx.module_callers("nonexistent.pkg")
-    assert result == {"results": [], "truncated": False}
+    assert result["results"] == []
+    assert result["truncated"] is False
+    assert "stale" in result  # staleness fields always present
 
 
 def test_module_callees_no_match() -> None:
     """A prefix matching no module nodes returns empty results, no error."""
     idx = CallGraphIndex.from_raw("/tmp/sample", _prefix_raw())
     result = idx.module_callees("nonexistent.pkg")
-    assert result == {"results": [], "truncated": False}
+    assert result["results"] == []
+    assert result["truncated"] is False
+    assert "stale" in result
 
 
 def test_module_callers_empty_prefix() -> None:

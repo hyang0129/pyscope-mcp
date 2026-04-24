@@ -181,20 +181,23 @@ def test_file_skeleton_returns_symbols() -> None:
     assert result["truncated"] is False
     assert result["total"] == 3
     assert len(result["results"]) == 3
-    # Pre-v3: stale=True with index_format_incompatible
+    # Pre-v3: stale=True with index_format_incompatible (uniform shape)
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "index_format_incompatible"
+    assert result["stale_files"] == []
+    assert result["index_stale_reason"] == "index_format_incompatible"
+    assert "staleness_info" not in result
 
 
 def test_file_skeleton_unknown_path_returns_error() -> None:
-    """Unknown path returns isError:true AND stale:true with reason file_not_in_index."""
+    """Unknown path returns isError:true AND stale:true with stale_files=[]."""
     idx = _make_index_with_skeletons({"mod.py": []}, file_shas={})
     result = idx.file_skeleton("nonexistent/file.py")
 
     assert result["isError"] is True
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "file_not_in_index"
-    assert "build" in result["staleness_info"]["action"].lower()
+    assert result["stale_files"] == []
+    assert "build" in result["stale_action"].lower()
+    assert "staleness_info" not in result
 
 
 def test_file_skeleton_truncation_at_50() -> None:
@@ -301,10 +304,12 @@ def test_load_version_1_backward_compat(tmp_path: Path) -> None:
     loaded = CallGraphIndex.load(out)
     assert loaded.skeletons == {"any.py": []}
     assert loaded.file_shas is None
-    # Querying any known path on a pre-v3 index → stale: index_format_incompatible
+    # Querying any known path on a pre-v3 index → stale: index_format_incompatible (uniform shape)
     result = loaded.file_skeleton("any.py")
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "index_format_incompatible"
+    assert result["stale_files"] == []
+    assert result["index_stale_reason"] == "index_format_incompatible"
+    assert "staleness_info" not in result
 
 
 def test_load_version_2_backward_compat(tmp_path: Path) -> None:
@@ -347,12 +352,14 @@ def test_file_skeleton_stale_sha_match(tmp_path: Path) -> None:
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is False
-    assert "staleness_info" not in result or result.get("staleness_info") is None
+    assert result["stale_files"] == []
+    assert "staleness_info" not in result
+    assert "stale_action" not in result
     assert len(result["results"]) == 1
 
 
 def test_file_skeleton_stale_sha_mismatch(tmp_path: Path) -> None:
-    """Scenario B: v3 index, file on disk has different content → stale: true, file_changed."""
+    """Scenario B: v3 index, file on disk has different content → stale: true, stale_files=[path]."""
     original = b"def foo(): pass\n"
     live_file = tmp_path / "mod.py"
     live_file.write_bytes(b"def foo(): return 42\n")  # different content
@@ -363,14 +370,15 @@ def test_file_skeleton_stale_sha_mismatch(tmp_path: Path) -> None:
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "file_changed"
-    assert "build" in result["staleness_info"]["action"].lower()
+    assert result["stale_files"] == ["mod.py"]
+    assert "build" in result["stale_action"].lower()
+    assert "staleness_info" not in result
     # Results are still returned
     assert len(result["results"]) == 1
 
 
 def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
-    """Scenario C: v3 index, file absent from disk → stale: true, file_not_found."""
+    """Scenario C: v3 index, file absent from disk → stale: true, stale_files=[path]."""
     symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
     shas = {"mod.py": "somehex"}
     # Don't create the file on disk
@@ -378,19 +386,21 @@ def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "file_not_found"
+    assert result["stale_files"] == ["mod.py"]
+    assert "staleness_info" not in result
     # Results still returned (from index)
     assert len(result["results"]) == 1
 
 
 def test_file_skeleton_stale_file_not_in_index(tmp_path: Path) -> None:
-    """Scenario D: v3 index, path not in skeletons → isError: true, stale: true, file_not_in_index."""
+    """Scenario D: v3 index, path not in skeletons → isError: true, stale: true, stale_files=[]."""
     idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={}, file_shas={})
 
     result = idx.file_skeleton("new_mod.py")
     assert result["isError"] is True
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "file_not_in_index"
+    assert result["stale_files"] == []
+    assert "staleness_info" not in result
 
 
 def test_file_skeleton_stale_pre_v3_index(tmp_path: Path) -> None:
@@ -401,7 +411,9 @@ def test_file_skeleton_stale_pre_v3_index(tmp_path: Path) -> None:
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True
-    assert result["staleness_info"]["reason"] == "index_format_incompatible"
+    assert result["stale_files"] == []
+    assert result["index_stale_reason"] == "index_format_incompatible"
+    assert "staleness_info" not in result
     # Results are still returned
     assert len(result["results"]) == 1
 

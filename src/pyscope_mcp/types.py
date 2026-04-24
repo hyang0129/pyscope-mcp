@@ -17,6 +17,10 @@ class SearchResult(TypedDict):
     results: list[str]
     truncated: bool
     total_matched: int
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
 
 
 class StatsResult(TypedDict):
@@ -33,6 +37,10 @@ class CallersResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
 
 
 class CalleesResult(TypedDict):
@@ -40,19 +48,37 @@ class CalleesResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
+
+
+class ModuleResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.module_callers` and
+    :meth:`CallGraphIndex.module_callees`."""
+
+    results: list[str]
+    truncated: bool
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
 
 
 class NeighborhoodResult(TypedDict, total=False):
     """Return shape for :meth:`CallGraphIndex.neighborhood`.
 
-    All fields except ``depth_truncated`` are **always present**.
+    All fields except ``depth_truncated``, ``stale_action``, and
+    ``index_stale_reason`` are **always present**.
     ``depth_truncated`` is present **only** when ``truncated=True``; it is
     absent from the dict when ``truncated=False``.
+    ``stale_action`` is present only when ``stale=True``.
+    ``index_stale_reason`` is present only on the pre-v3 index path.
 
-    ``total=False`` is used (rather than a base-class split) because
-    ``depth_truncated`` must be omitted entirely (not set to ``None``) in
-    the non-truncated path — ``NotRequired`` marks it as the sole optional
-    field while the remaining fields are always constructed by
+    ``total=False`` is used (rather than a base-class split) because multiple
+    fields must be omitted entirely when not applicable — ``NotRequired`` marks
+    them as optional while the remaining fields are always constructed by
     :meth:`CallGraphIndex.neighborhood`.
 
     ``token_budget_used`` reflects the serialised character count / 4
@@ -65,3 +91,7 @@ class NeighborhoodResult(TypedDict, total=False):
     edges: list[list[str]]  # list of [caller, callee] pairs
     truncated: bool
     token_budget_used: int
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
