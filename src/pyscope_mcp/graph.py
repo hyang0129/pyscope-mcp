@@ -160,9 +160,22 @@ class CallGraphIndex:
     def module_callees(self, module: str, depth: int = 1) -> list[str]:
         return _bfs(self.module_graph, module, depth)
 
-    def search(self, substring: str, limit: int = 50) -> list[str]:
+    def search(self, substring: str, limit: int = 50) -> dict:
+        """Substring search over known fully-qualified function names.
+
+        Returns a dict with:
+          - ``results``: list of matching FQNs (capped at *limit*)
+          - ``truncated``: True when the full match count exceeds *limit*
+          - ``total_matched``: count of all matches before capping
+        """
         s = substring.lower()
-        return [n for n in self.function_graph.nodes if s in n.lower()][:limit]
+        all_matches = [n for n in self.function_graph.nodes if s in n.lower()]
+        total = len(all_matches)
+        return {
+            "results": all_matches[:limit],
+            "truncated": total > limit,
+            "total_matched": total,
+        }
 
     def stats(self) -> dict[str, int]:
         return {
