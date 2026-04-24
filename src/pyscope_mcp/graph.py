@@ -154,11 +154,25 @@ class CallGraphIndex:
     def callees_of(self, fqn: str, depth: int = 1) -> list[str]:
         return _bfs(self.function_graph, fqn, depth)
 
-    def module_callers(self, module: str, depth: int = 1) -> list[str]:
-        return _bfs(self.module_graph.reverse(copy=False), module, depth)
+    def module_callers(self, module: str, depth: int = 1) -> dict[str, object]:
+        """Return callers of all modules whose FQN starts with *module* (prefix query).
 
-    def module_callees(self, module: str, depth: int = 1) -> list[str]:
-        return _bfs(self.module_graph, module, depth)
+        An exact FQN is a degenerate prefix and behaves identically to the
+        pre-change implementation.  Results are capped at 50 items; the
+        ``truncated`` key in the returned dict signals when the cap triggers.
+        An empty-string prefix matches all modules.  A prefix that matches no
+        module nodes returns ``{"results": [], "truncated": false}``.
+        """
+        return _prefix_module_bfs(
+            self.module_graph.reverse(copy=False), self.module_graph, module, depth
+        )
+
+    def module_callees(self, module: str, depth: int = 1) -> dict[str, object]:
+        """Return callees of all modules whose FQN starts with *module* (prefix query).
+
+        Symmetric to :meth:`module_callers` — see its docstring for semantics.
+        """
+        return _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
 
     def search(self, substring: str, limit: int = 50) -> dict[str, object]:
         """Substring search over known fully-qualified function names.
@@ -186,8 +200,46 @@ class CallGraphIndex:
         }
 
 
+_MODULE_BFS_CAP = 50
+
+
 def _module_of(fqn: str) -> str:
     return fqn.rsplit(".", 1)[0] if "." in fqn else fqn
+
+
+def _prefix_module_bfs(
+    query_graph: _DiGraph | _DiGraphReverseView,
+    node_graph: _DiGraph,
+    prefix: str,
+    depth: int,
+    cap: int = _MODULE_BFS_CAP,
+) -> dict[str, object]:
+    """BFS over *query_graph* for all nodes in *node_graph* whose FQN starts with *prefix*.
+
+    Results from each matched seed node are unioned and deduplicated.  The matched
+    seed nodes themselves are excluded from the result set (same semantics as _bfs).
+    Results are capped at *cap*; ``truncated`` reflects whether the full union
+    exceeded the cap.
+
+    ``prefix=""`` matches all module nodes.
+    """
+    # Collect all module nodes that start with the given prefix
+    matched_seeds = [n for n in node_graph.nodes if n.startswith(prefix)]
+
+    # Union BFS results across all matched seeds, excluding the seeds themselves
+    seed_set = set(matched_seeds)
+    union: set[str] = set()
+    for seed in matched_seeds:
+        for node in _bfs(query_graph, seed, depth):
+            if node not in seed_set:
+                union.add(node)
+
+    results_all = sorted(union)
+    truncated = len(results_all) > cap
+    return {
+        "results": results_all[:cap],
+        "truncated": truncated,
+    }
 
 
 def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> list[str]:
