@@ -42,7 +42,7 @@ def test_httpx_client_post_accepted(tmp_path: Path) -> None:
             "    client.post(url, content=data)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("httpx_method_call", 0) >= 1, (
         f"Expected httpx_method_call in accepted, got: {summary['accepted_counts']}"
@@ -64,7 +64,7 @@ def test_httpx_async_client_get_accepted(tmp_path: Path) -> None:
             "    return resp\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("httpx_method_call", 0) >= 1
 
@@ -83,7 +83,7 @@ def test_boto3_client_put_object_accepted(tmp_path: Path) -> None:
             "    client.put_object(Bucket=bucket, Key=key, Body=body)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("boto3_method_call", 0) >= 1
     patterns = {e["pattern"] for e in report["unresolved_calls"]}
@@ -101,7 +101,7 @@ def test_boto3_client_head_object_accepted(tmp_path: Path) -> None:
             "    return True\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("boto3_method_call", 0) >= 1
 
 
@@ -121,7 +121,7 @@ def test_boto3_paginator_paginate_accepted(tmp_path: Path) -> None:
             "        pass\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     # get_paginator itself is boto3_method_call; paginator.paginate is also boto3_method_call
     assert summary["accepted_counts"].get("boto3_method_call", 0) >= 2, (
@@ -144,7 +144,7 @@ def test_typer_command_accepted(tmp_path: Path) -> None:
             "    _cli.command()(lambda: None)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     summary = report["summary"]
     assert summary["accepted_counts"].get("typer_method_call", 0) >= 1
 
@@ -160,7 +160,7 @@ def test_typer_command_in_function_accepted(tmp_path: Path) -> None:
             "    return app\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("typer_method_call", 0) >= 1
 
 
@@ -178,7 +178,7 @@ def test_googleapi_channels_list_accepted(tmp_path: Path) -> None:
             "    service.channels()\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("googleapi_method_call", 0) >= 1
 
 
@@ -198,7 +198,7 @@ def test_shadowed_local_not_accepted(tmp_path: Path) -> None:
             "    client.post('http://example.com')\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # After shadow, client is int — should NOT be accepted as httpx_method_call.
     assert report["summary"]["accepted_counts"].get("httpx_method_call", 0) == 0, (
         "Shadowed local should not be accepted as httpx_method_call"
@@ -220,7 +220,7 @@ def test_non_whitelisted_factory_not_accepted(tmp_path: Path) -> None:
             "    client.post('http://example.com')\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     assert report["summary"]["accepted_counts"].get("httpx_method_call", 0) == 0
     assert report["summary"]["accepted_counts"].get("boto3_method_call", 0) == 0
     assert report["summary"]["accepted_counts"].get("typer_method_call", 0) == 0
@@ -239,7 +239,7 @@ def test_parameter_not_accepted(tmp_path: Path) -> None:
             "    client.post(url)\n"
         ),
     })
-    _raw, report, _skeletons = build_with_report(root, "pkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # No factory binding — should not be httpx_method_call accepted
     assert report["summary"]["accepted_counts"].get("httpx_method_call", 0) == 0
 
@@ -261,7 +261,7 @@ def test_inpackage_class_wins_over_whitelist(tmp_path: Path) -> None:
             "    c.post('http://example.com')\n"
         ),
     })
-    raw, report, _skeletons = build_with_report(root, "pkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "pkg")
     # Resolved in-package, not accepted as httpx_method_call
     assert "pkg.mod.Client.post" in raw.get("pkg.mod.run", [])
     assert report["summary"]["accepted_counts"].get("httpx_method_call", 0) == 0

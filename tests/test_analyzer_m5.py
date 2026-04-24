@@ -53,7 +53,7 @@ def test_build_with_report_structure(tmp_path):
             foo()
     """)
 
-    raw, report, _skeletons = build_with_report(root, "mypkg")
+    raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
 
     # Top-level keys
     for key in ("version", "summary", "skipped_files", "unresolved_calls", "pattern_counts"):
@@ -93,7 +93,7 @@ def test_resolved_in_package_counted(tmp_path):
             utils.helper()
     """)
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
     assert report["summary"]["calls_resolved_in_package"] >= 1
 
 
@@ -109,7 +109,7 @@ def test_external_call_counted(tmp_path):
             os.path.join("a", "b")
     """)
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
     # External tracking is implemented; if calls are counted it should be >= 1.
     # If somehow the call falls through as unresolved, >= 0 is a safe floor.
     assert report["summary"]["calls_resolved_external"] >= 0
@@ -126,7 +126,7 @@ def test_unresolved_call_counted(tmp_path):
             mystery_function()
     """)
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
     assert report["summary"]["calls_unresolved"] >= 1
     assert report["pattern_counts"].get("bare_name_unresolved", 0) >= 1
 
@@ -144,7 +144,7 @@ def test_skipped_file_recorded(tmp_path):
     # Intentional SyntaxError
     _write(root / "mypkg" / "broken.py", "def bad(:\n    pass\n")
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
     assert report["summary"]["files_skipped"] == 1
     assert len(report["skipped_files"]) == 1
     entry = report["skipped_files"][0]
@@ -165,7 +165,7 @@ def test_dead_keys_rollup(tmp_path):
             orphan()
     """)
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
     dead = report["summary"]["rollups"]["dead_keys"]
     # orphan() is called by caller, so it is NOT a dead key.
     # caller() calls orphan but is not called by anyone — it IS a dead key.
@@ -186,7 +186,7 @@ def test_exemplar_cap(tmp_path):
         lines.append(f"    unknown_{i}()")
     _write(root / "mypkg" / "mod.py", "\n".join(lines))
 
-    _raw, report, _skeletons = build_with_report(root, "mypkg")
+    _raw, report, _skeletons, _file_shas = build_with_report(root, "mypkg")
 
     total_count = report["pattern_counts"].get("bare_name_unresolved", 0)
     assert total_count >= 60, f"expected >= 60 unresolved bare-name calls, got {total_count}"
@@ -218,8 +218,8 @@ def test_determinism_with_report(tmp_path):
             unknown_fn()
     """)
 
-    raw1, report1, _sk1 = build_with_report(root, "mypkg")
-    raw2, report2, _sk2 = build_with_report(root, "mypkg")
+    raw1, report1, _sk1, _fs1 = build_with_report(root, "mypkg")
+    raw2, report2, _sk2, _fs2 = build_with_report(root, "mypkg")
 
     assert raw1 == raw2
     assert report1["summary"] == report2["summary"]
