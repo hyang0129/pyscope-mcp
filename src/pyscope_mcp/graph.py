@@ -353,8 +353,7 @@ class CallGraphIndex:
         node_depth: dict[str, int] = {symbol: 0}
         frontier: deque[tuple[str, int]] = deque([(symbol, 0)])
 
-        # All edges as (hop_depth, caller, callee) — deduplicated at the end
-        edge_set: set[tuple[str, str]] = set()
+        # Edge deduplication and depth tracking: maps (caller, callee) → min hop_depth
         edge_depths: dict[tuple[str, str], int] = {}  # min hop_depth for edge
 
         while frontier:
@@ -396,14 +395,17 @@ class CallGraphIndex:
         # Ranking key: (hop_depth ASC, -degree DESC, caller ASC, callee ASC)
         # degree = out-degree + in-degree of the caller node in the full graph
         # ------------------------------------------------------------------
-        def _degree(node: str) -> int:
-            out = sum(1 for _ in fg.successors(node))
-            inp = sum(1 for _ in rev_fg.successors(node))
-            return out + inp
+        # Precompute degrees for all unique caller nodes to avoid O(E×degree)
+        # redundant traversals during sort.
+        caller_nodes = {e[0] for e in edge_depths}
+        degree_cache: dict[str, int] = {
+            n: sum(1 for _ in fg.successors(n)) + sum(1 for _ in rev_fg.successors(n))
+            for n in caller_nodes
+        }
 
         ranked_edges = sorted(
             edge_depths.keys(),
-            key=lambda e: (edge_depths[e], -_degree(e[0]), e[0], e[1]),
+            key=lambda e: (edge_depths[e], -degree_cache.get(e[0], 0), e[0], e[1]),
         )
 
         # ------------------------------------------------------------------

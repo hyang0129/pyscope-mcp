@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from pyscope_mcp.graph import CallGraphIndex
@@ -289,7 +290,6 @@ def test_neighborhood_truncated() -> None:
     assert result["truncated"] is True
     assert "depth_truncated" in result
     # Must satisfy budget constraint
-    import json
     result_json = json.dumps(result["edges"])
     # The edges list itself should be small
     assert len(result["edges"]) == 0 or len(result_json) <= 1 * 4 + 50  # loose check
@@ -297,13 +297,13 @@ def test_neighborhood_truncated() -> None:
 
 def test_neighborhood_token_budget_enforced() -> None:
     """neighborhood response content fits within token_budget * 4 chars."""
-    import json
     idx = CallGraphIndex.from_raw("/tmp/sample", _neighborhood_raw())
     token_budget = 5  # very tight
     result = idx.neighborhood("b.middle", depth=2, token_budget=token_budget)
-    # The edges JSON representation must fit within the budget
+    # The edges JSON representation must fit strictly within the budget.
+    # +2 accounts for the outer '[]' brackets in JSON serialisation of the list.
     edges_json = json.dumps(result["edges"])
-    assert len(edges_json) <= token_budget * 4 + 50  # +50 for overhead
+    assert len(edges_json) <= token_budget * 4 + 2  # +2 for '[]' list brackets
 
 
 def test_neighborhood_unknown_symbol() -> None:

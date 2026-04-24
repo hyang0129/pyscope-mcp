@@ -1122,6 +1122,11 @@ async def test_tool_neighborhood_happy_path(server: RpcServer):
     assert isinstance(payload["truncated"], bool)
     assert "token_budget_used" in payload
     assert isinstance(payload["token_budget_used"], int)
+    # depth_truncated must NOT be present when truncated is False
+    if not payload["truncated"]:
+        assert "depth_truncated" not in payload, (
+            "depth_truncated must be absent from response when truncated=False"
+        )
 
 
 @pytest.mark.asyncio
