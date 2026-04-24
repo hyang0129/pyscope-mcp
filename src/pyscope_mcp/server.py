@@ -70,7 +70,9 @@ _TOOL_LIST = [
         "description": (
             "List functions that (transitively, up to depth) call the given function. "
             "Results are capped at 50; when the cap triggers, `truncated` is true. "
-            "Returns {results: [...], truncated: bool}."
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
+            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -87,7 +89,9 @@ _TOOL_LIST = [
         "description": (
             "List functions (transitively, up to depth) called by the given function. "
             "Results are capped at 50; when the cap triggers, `truncated` is true. "
-            "Returns {results: [...], truncated: bool}."
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
+            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -109,7 +113,9 @@ _TOOL_LIST = [
             "An empty string matches all modules. "
             "Results are capped at 50 and deduplicated; when the cap triggers, "
             "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
-            "Returns {results: [...], truncated: bool}."
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
+            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -134,7 +140,9 @@ _TOOL_LIST = [
             "An empty string matches all modules. "
             "Results are capped at 50 and deduplicated; when the cap triggers, "
             "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
-            "Returns {results: [...], truncated: bool}."
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
+            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -154,7 +162,9 @@ _TOOL_LIST = [
         "description": (
             "Substring search over known fully-qualified function names. "
             "Results are capped at `limit` (default 50); use a more specific query if `truncated` is true. "
-            "Returns {results: [...], truncated: bool, total_matched: int}."
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
+            "Returns {results: [...], truncated: bool, total_matched: int, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -175,13 +185,13 @@ _TOOL_LIST = [
             "signature (first def-line only, no body), and lineno. "
             "Results are sorted by lineno and capped at 50; when the cap triggers, "
             "`truncated` is true and `total` holds the full count. "
-            "Response always includes `stale: bool`. When stale is true, `staleness_info` "
-            "provides a machine-readable `reason` (file_changed | file_not_found | "
-            "file_not_in_index | index_format_incompatible) and an `action` string. "
-            "If the file was added after the last build (file_not_in_index), returns "
-            "isError:true alongside stale fields. "
-            "Returns {results: [...], truncated: bool, total: int, stale: bool, "
-            "staleness_info?: {reason, action}} or {isError: true, stale: true, staleness_info: {...}}."
+            "Response always includes `stale: bool` and `stale_files: list[str]`. "
+            "When stale is true, `stale_files` lists the relative paths of changed files "
+            "and `stale_action` provides a remediation string. "
+            "If the file was added after the last build, returns isError:true alongside stale fields. "
+            "For pre-v3 indexes, `index_stale_reason: 'index_format_incompatible'` is set. "
+            "Returns {results: [...], truncated: bool, total: int, stale: bool, stale_files: [...], "
+            "stale_action?: str} or {isError: true, stale: true, stale_files: [], stale_action: str}."
         ),
         "inputSchema": {
             "type": "object",
@@ -207,8 +217,10 @@ _TOOL_LIST = [
             "level where dropping started, and `depth_full` indicates the deepest level with "
             "complete data. "
             "Default token_budget=1000. "
+            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
+            "and `stale_action: str` when stale is true. "
             "Returns {symbol, depth_full, depth_truncated?, edges: [[caller, callee], ...], "
-            "truncated: bool, token_budget_used: int}."
+            "truncated: bool, token_budget_used: int, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -352,7 +364,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
             return _error_result("file_skeleton requires 'path'")
         result = idx.file_skeleton(path)
         if result.get("isError"):
-            # Emit the full dict (including stale/staleness_info) so callers can
+            # Emit the full dict (including stale/stale_files) so callers can
             # branch on machine-readable staleness fields, not just the message string.
             return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
         return _text(result)

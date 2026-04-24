@@ -10,6 +10,7 @@ from typing import TypedDict
 from pyscope_mcp.types import (
     CalleesResult,
     CallersResult,
+    ModuleResult,
     NeighborhoodResult,
     SearchResult,
     StatsResult,
@@ -139,6 +140,9 @@ class CallGraphIndex:
     skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
     # None = pre-v3 index (no hashes stored); dict = v3 index with per-file SHA256 digests.
     file_shas: dict[str, str] | None = field(default=None)
+    # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
+    # Not serialised — rebuilt on every load.
+    _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_raw(
@@ -160,13 +164,20 @@ class CallGraphIndex:
                 tm = _module_of(callee)
                 if cm != tm:
                     mg.add_edge(cm, tm)
+        skeletons = skeletons or {}
+        # Invert skeletons → _fqn_to_file: {fqn: rel_path}
+        fqn_to_file: dict[str, str] = {}
+        for rel_path, symbols in skeletons.items():
+            for sym in symbols:
+                fqn_to_file[sym["fqn"]] = rel_path
         return cls(
             root=root,
             function_graph=fg,
             module_graph=mg,
             raw=raw,
-            skeletons=skeletons or {},
+            skeletons=skeletons,
             file_shas=file_shas,
+            _fqn_to_file=fqn_to_file,
         )
 
     def save(self, path: str | Path) -> Path:
@@ -202,6 +213,53 @@ class CallGraphIndex:
 
     _STALE_ACTION = "Run 'pyscope-mcp build' then 'reload' to update the index."
 
+    def _staleness_for(self, fqns: list[str]) -> dict:
+        """Compute result-scoped staleness for a list of FQNs.
+
+        Returns a dict with uniform staleness shape:
+          - ``{"stale": False, "stale_files": []}`` when all backing files are clean.
+          - ``{"stale": True, "stale_files": [...], "stale_action": ...}`` when any
+            file backing a result FQN has changed since the last build.
+          - ``{"stale": True, "stale_files": [], "index_stale_reason": "index_format_incompatible",
+            "stale_action": ...}`` for pre-v3 indexes (file_shas is None).
+
+        Only files that back the provided FQNs are checked (result-scoped).
+        Files in the index that do not appear in the result set are ignored.
+        """
+        if self.file_shas is None:
+            return {
+                "stale": True,
+                "stale_files": [],
+                "index_stale_reason": "index_format_incompatible",
+                "stale_action": self._STALE_ACTION,
+            }
+
+        # Collect the unique file paths that back the provided FQNs.
+        result_files: set[str] = set()
+        for fqn in fqns:
+            rel = self._fqn_to_file.get(fqn)
+            if rel is not None:
+                result_files.add(rel)
+
+        stale_files: list[str] = []
+        for rel in sorted(result_files):
+            stored_sha = self.file_shas.get(rel)
+            live_file = self.root / rel
+            if not live_file.exists():
+                stale_files.append(rel)
+                continue
+            live_sha = hashlib.sha256(live_file.read_bytes()).hexdigest()
+            if stored_sha is None or live_sha != stored_sha:
+                stale_files.append(rel)
+
+        if stale_files:
+            return {
+                "stale": True,
+                "stale_files": stale_files,
+                "stale_action": self._STALE_ACTION,
+            }
+        return {"stale": False, "stale_files": []}
+
     def file_skeleton(self, path: str, cap: int = _SKELETON_CAP) -> dict:
         """Return a compact symbol list for the given relative file path.
 
@@ -210,39 +268,24 @@ class CallGraphIndex:
           - ``truncated``: True when the full symbol count exceeds *cap*
           - ``total``: total number of symbols before capping
           - ``stale``: True when the live file differs from what was indexed
-          - ``staleness_info``: dict with ``reason`` and ``action`` when ``stale`` is True
-
-        Staleness reasons:
-          - ``file_changed``: file exists but content has changed since build
-          - ``file_not_found``: file was in the index but no longer exists on disk
-          - ``file_not_in_index``: path not in index (also sets ``isError: True``)
-          - ``index_format_incompatible``: index is pre-v3 and has no stored hashes
+          - ``stale_files``: list of stale relative paths (the queried file, or [])
+          - ``stale_action``: guidance on how to fix staleness (present only when stale=True)
+          - ``index_stale_reason``: ``"index_format_incompatible"`` for pre-v3 indexes
 
         Results are always returned when the path is in the index, even when stale.
         If the path is not in the index, returns an error dict with ``isError: True``.
         """
-        # Scenario D / Scenario E (isError cases that may also carry stale info)
+        # Scenario D / isError: path not in skeletons
         if path not in self.skeletons:
-            if self.file_shas is None:
-                # Pre-v3 index: stale, but we can't distinguish not-in-index from
-                # index_format_incompatible for paths absent from skeletons.
-                # Since the path isn't in skeletons either, use file_not_in_index.
-                return {
-                    "isError": True,
-                    "stale": True,
-                    "staleness_info": {
-                        "reason": "file_not_in_index",
-                        "action": self._STALE_ACTION,
-                    },
-                }
-            return {
+            result: dict = {
                 "isError": True,
                 "stale": True,
-                "staleness_info": {
-                    "reason": "file_not_in_index",
-                    "action": self._STALE_ACTION,
-                },
+                "stale_files": [],
+                "stale_action": self._STALE_ACTION,
             }
+            if self.file_shas is None:
+                result["index_stale_reason"] = "index_format_incompatible"
+            return result
 
         symbols = self.skeletons[path]
         total = len(symbols)
@@ -256,10 +299,9 @@ class CallGraphIndex:
         # Scenario E: pre-v3 index — no hashes available.
         if self.file_shas is None:
             base_result["stale"] = True
-            base_result["staleness_info"] = {
-                "reason": "index_format_incompatible",
-                "action": self._STALE_ACTION,
-            }
+            base_result["stale_files"] = []
+            base_result["index_stale_reason"] = "index_format_incompatible"
+            base_result["stale_action"] = self._STALE_ACTION
             return base_result
 
         # Scenarios A/B/C: v3 index — compare live file hash against stored hash.
@@ -267,10 +309,8 @@ class CallGraphIndex:
         if not live_file.exists():
             # Scenario C: file deleted since build.
             base_result["stale"] = True
-            base_result["staleness_info"] = {
-                "reason": "file_not_found",
-                "action": self._STALE_ACTION,
-            }
+            base_result["stale_files"] = [path]
+            base_result["stale_action"] = self._STALE_ACTION
             return base_result
 
         stored_sha = self.file_shas.get(path)
@@ -279,14 +319,13 @@ class CallGraphIndex:
         if stored_sha is None or live_sha != stored_sha:
             # Scenario B: file changed.
             base_result["stale"] = True
-            base_result["staleness_info"] = {
-                "reason": "file_changed",
-                "action": self._STALE_ACTION,
-            }
+            base_result["stale_files"] = [path]
+            base_result["stale_action"] = self._STALE_ACTION
             return base_result
 
         # Scenario A: fresh — hashes match.
         base_result["stale"] = False
+        base_result["stale_files"] = []
         return base_result
 
     _CALLERS_CALLEES_CAP = 50
@@ -295,24 +334,34 @@ class CallGraphIndex:
         """Return functions that (transitively, up to depth) call *fqn*.
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
+        Response includes uniform staleness fields (``stale``, ``stale_files``,
+        and optionally ``stale_action`` / ``index_stale_reason``).
         """
         all_results = _bfs(self.function_graph.reverse(copy=False), fqn, depth)
         truncated = len(all_results) > self._CALLERS_CALLEES_CAP
+        results = all_results[: self._CALLERS_CALLEES_CAP]
+        staleness = self._staleness_for(results)
         return CallersResult(
-            results=all_results[: self._CALLERS_CALLEES_CAP],
+            results=results,
             truncated=truncated,
+            **staleness,  # type: ignore[arg-type]
         )
 
     def callees_of(self, fqn: str, depth: int = 1) -> CalleesResult:
         """Return functions (transitively, up to depth) called by *fqn*.
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
+        Response includes uniform staleness fields (``stale``, ``stale_files``,
+        and optionally ``stale_action`` / ``index_stale_reason``).
         """
         all_results = _bfs(self.function_graph, fqn, depth)
         truncated = len(all_results) > self._CALLERS_CALLEES_CAP
+        results = all_results[: self._CALLERS_CALLEES_CAP]
+        staleness = self._staleness_for(results)
         return CalleesResult(
-            results=all_results[: self._CALLERS_CALLEES_CAP],
+            results=results,
             truncated=truncated,
+            **staleness,  # type: ignore[arg-type]
         )
 
     def neighborhood(
@@ -382,13 +431,16 @@ class CallGraphIndex:
 
         if not edge_depths:
             # Symbol not in graph or isolated node — return minimal result
-            return NeighborhoodResult(
+            staleness = self._staleness_for([symbol])
+            result = NeighborhoodResult(
                 symbol=symbol,
                 depth_full=0,
                 edges=[],
                 truncated=False,
                 token_budget_used=0,
             )
+            result.update(staleness)  # type: ignore[arg-type]
+            return result
 
         # ------------------------------------------------------------------
         # Phase 2: rank edges deterministically
@@ -446,6 +498,12 @@ class CallGraphIndex:
         # ------------------------------------------------------------------
         # Phase 4: assemble result
         # ------------------------------------------------------------------
+        # Collect unique FQNs from kept edges for result-scoped staleness check.
+        unique_fqns: list[str] = list(
+            {fqn for edge in kept_edges for fqn in edge}
+        )
+        staleness = self._staleness_for(unique_fqns)
+
         result = NeighborhoodResult(
             symbol=symbol,
             depth_full=depth_full,
@@ -453,30 +511,71 @@ class CallGraphIndex:
             truncated=truncated,
             token_budget_used=chars_used // 4,
         )
+        result.update(staleness)  # type: ignore[arg-type]
         if truncated and depth_truncated is not None:
             result["depth_truncated"] = depth_truncated
 
         return result
 
-    def module_callers(self, module: str, depth: int = 1) -> dict[str, object]:
+    def module_callers(self, module: str, depth: int = 1) -> ModuleResult:
         """Return callers of all modules whose FQN starts with *module* (prefix query).
 
         An exact FQN is a degenerate prefix and behaves identically to the
         pre-change implementation.  Results are capped at 50 items; the
         ``truncated`` key in the returned dict signals when the cap triggers.
         An empty-string prefix matches all modules.  A prefix that matches no
-        module nodes returns ``{"results": [], "truncated": false}``.
+        module nodes returns ``{"results": [], "truncated": false, "stale": ..., "stale_files": []}``.
+
+        Staleness is result-scoped: module FQNs are expanded to file paths via
+        prefix-matching against ``_fqn_to_file`` (find all symbol FQNs that start
+        with ``result_module + "."``).
         """
-        return _prefix_module_bfs(
+        base = _prefix_module_bfs(
             self.module_graph.reverse(copy=False), self.module_graph, module, depth
         )
+        result_modules: list[str] = base["results"]  # type: ignore[assignment]
+        staleness = self._staleness_for_modules(result_modules)
+        return ModuleResult(
+            results=result_modules,
+            truncated=base["truncated"],  # type: ignore[typeddict-item]
+            **staleness,  # type: ignore[arg-type]
+        )
 
-    def module_callees(self, module: str, depth: int = 1) -> dict[str, object]:
+    def module_callees(self, module: str, depth: int = 1) -> ModuleResult:
         """Return callees of all modules whose FQN starts with *module* (prefix query).
 
         Symmetric to :meth:`module_callers` — see its docstring for semantics.
         """
-        return _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
+        base = _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
+        result_modules: list[str] = base["results"]  # type: ignore[assignment]
+        staleness = self._staleness_for_modules(result_modules)
+        return ModuleResult(
+            results=result_modules,
+            truncated=base["truncated"],  # type: ignore[typeddict-item]
+            **staleness,  # type: ignore[arg-type]
+        )
+
+    def _staleness_for_modules(self, module_fqns: list[str]) -> dict:
+        """Expand module FQNs to symbol FQNs and delegate to ``_staleness_for``.
+
+        Module FQNs (e.g. ``pkg.mod``) are not stored in ``_fqn_to_file``; only
+        function/class/method FQNs are.  We expand by finding all ``_fqn_to_file``
+        keys that start with ``module_fqn + "."``.
+        """
+        if self.file_shas is None:
+            return {
+                "stale": True,
+                "stale_files": [],
+                "index_stale_reason": "index_format_incompatible",
+                "stale_action": self._STALE_ACTION,
+            }
+        symbol_fqns: list[str] = []
+        for mod in module_fqns:
+            prefix = mod + "."
+            for fqn in self._fqn_to_file:
+                if fqn.startswith(prefix):
+                    symbol_fqns.append(fqn)
+        return self._staleness_for(symbol_fqns)
 
     def search(self, substring: str, limit: int = 50) -> SearchResult:
         """Substring search over known fully-qualified function names.
@@ -485,14 +584,18 @@ class CallGraphIndex:
           - ``results``: list of matching FQNs (capped at *limit*)
           - ``truncated``: True when the full match count exceeds *limit*
           - ``total_matched``: count of all matches before capping
+          - ``stale``, ``stale_files``: result-scoped staleness info
         """
         s = substring.lower()
         all_matches = [n for n in self.function_graph.nodes if s in n.lower()]
         total = len(all_matches)
+        results = all_matches[:limit]
+        staleness = self._staleness_for(results)
         return SearchResult(
-            results=all_matches[:limit],
+            results=results,
             truncated=total > limit,
             total_matched=total,
+            **staleness,  # type: ignore[arg-type]
         )
 
     def stats(self) -> StatsResult:

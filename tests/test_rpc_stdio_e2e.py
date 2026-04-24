@@ -462,7 +462,79 @@ def test_file_skeleton_stale_e2e_wire(tmp_path: Path) -> None:
 
         body = json.loads(r["result"]["content"][0]["text"])
         assert body["stale"] is True, f"expected stale=true; got {body}"
-        assert body["staleness_info"]["reason"] == "file_changed"
+        assert body["stale_files"] == [rel], f"expected stale_files=[{rel!r}]; got {body}"
+        assert "staleness_info" not in body, f"staleness_info should not be present; got {body}"
+
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r = _recv(proc)
+        assert r == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_callers_of_stale_e2e_wire(tmp_path: Path) -> None:
+    """E2E: build real index, modify source file, call callers_of → stale: true over the wire."""
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    core_file = pkg / "core.py"
+    core_file.write_text("def foo(): pass\n\ndef bar(): return foo()\n")
+
+    index_file = tmp_path / ".pyscope-mcp" / "index.json"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+    build_result = subprocess.run(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "build",
+            "--root", str(tmp_path),
+            "--package", "mypkg",
+            "--output", str(index_file),
+        ],
+        capture_output=True, env=env,
+    )
+    assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
+
+    # Modify core.py after build so SHA will differ
+    core_file.write_text("def foo(): return 42\n\ndef bar(): return foo()\n")
+
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "serve",
+            "--root", str(tmp_path),
+            "--index", str(index_file),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-stale-callers", "version": "0"},
+            },
+        })
+        r = _recv(proc)
+        assert r["id"] == 1
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.foo"}},
+        })
+        r = _recv(proc)
+        assert r["id"] == 2
+        assert "error" not in r, f"unexpected JSON-RPC error: {r}"
+
+        body = json.loads(r["result"]["content"][0]["text"])
+        assert body["stale"] is True, f"expected stale=true; got {body}"
+        assert "mypkg/core.py" in body["stale_files"], f"expected core.py in stale_files; got {body}"
+        assert "staleness_info" not in body, f"staleness_info should not be present; got {body}"
 
         _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
         r = _recv(proc)
