@@ -93,11 +93,23 @@ _TOOL_LIST = [
     },
     {
         "name": "module_callers",
-        "description": "List modules that import/call into the given module.",
+        "description": (
+            "List modules that import/call into the given module or package prefix. "
+            "The `module` argument is treated as a dotted-prefix query: supply a full "
+            "FQN (e.g. `pkg.mod`) for an exact match, or a package prefix "
+            "(e.g. `pkg.agents`) to aggregate callers across all matching modules. "
+            "An empty string matches all modules. "
+            "Results are capped at 50 and deduplicated; when the cap triggers, "
+            "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
+            "Returns {results: [...], truncated: bool}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "module": {"type": "string"},
+                "module": {
+                    "type": "string",
+                    "description": "Dotted module prefix or exact FQN, e.g. 'pkg.agents' or 'pkg.agents.writer'",
+                },
                 "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
             },
             "required": ["module"],
@@ -106,11 +118,23 @@ _TOOL_LIST = [
     },
     {
         "name": "module_callees",
-        "description": "List modules that the given module imports/calls into.",
+        "description": (
+            "List modules that the given module or package prefix imports/calls into. "
+            "The `module` argument is treated as a dotted-prefix query: supply a full "
+            "FQN (e.g. `pkg.mod`) for an exact match, or a package prefix "
+            "(e.g. `pkg.agents`) to aggregate callees across all matching modules. "
+            "An empty string matches all modules. "
+            "Results are capped at 50 and deduplicated; when the cap triggers, "
+            "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
+            "Returns {results: [...], truncated: bool}."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "module": {"type": "string"},
+                "module": {
+                    "type": "string",
+                    "description": "Dotted module prefix or exact FQN, e.g. 'pkg.agents' or 'pkg.agents.writer'",
+                },
                 "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
             },
             "required": ["module"],
@@ -229,13 +253,13 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
 
     if name == "module_callers":
         module = arguments.get("module")
-        if not module:
+        if module is None:
             return _error_result("module_callers requires 'module'")
         return _text(idx.module_callers(module, int(arguments.get("depth", 1))))
 
     if name == "module_callees":
         module = arguments.get("module")
-        if not module:
+        if module is None:
             return _error_result("module_callees requires 'module'")
         return _text(idx.module_callees(module, int(arguments.get("depth", 1))))
 

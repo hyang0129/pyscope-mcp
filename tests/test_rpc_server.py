@@ -236,6 +236,11 @@ async def test_tool_module_callers(server: RpcServer):
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "results" in payload
+    assert "truncated" in payload
+    assert isinstance(payload["results"], list)
+    assert isinstance(payload["truncated"], bool)
 
 
 @pytest.mark.asyncio
@@ -244,6 +249,75 @@ async def test_tool_module_callees(server: RpcServer):
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "results" in payload
+    assert "truncated" in payload
+    assert isinstance(payload["results"], list)
+    assert isinstance(payload["truncated"], bool)
+
+
+@pytest.mark.asyncio
+async def test_tool_module_callers_prefix(server: RpcServer):
+    """module_callers with a package prefix returns aggregated callers as {results, truncated}."""
+    # The fixture has: pkg.mod.foo, pkg.mod.bar, pkg.other.baz
+    # pkg.other calls into pkg.mod (pkg.other.baz → pkg.mod.foo)
+    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "pkg.mod"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "pkg.other" in payload["results"]
+
+
+@pytest.mark.asyncio
+async def test_tool_module_callees_prefix(server: RpcServer):
+    """module_callees with a package prefix returns aggregated callees as {results, truncated}."""
+    lines = [_req("tools/call", {"name": "module_callees", "arguments": {"module": "pkg.other"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "pkg.mod" in payload["results"]
+
+
+@pytest.mark.asyncio
+async def test_tool_module_callers_empty_prefix(server: RpcServer):
+    """Empty-string prefix is valid — matches all modules; payload has truncated key."""
+    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": ""}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "results" in payload
+    assert "truncated" in payload
+
+
+@pytest.mark.asyncio
+async def test_tool_module_callers_no_match(server: RpcServer):
+    """A prefix matching no module returns {results: [], truncated: false} — no error."""
+    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "does.not.exist"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert payload["results"] == []
+    assert payload["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_descriptions_mention_prefix(server: RpcServer):
+    """module_callers and module_callees tool descriptions document prefix semantics."""
+    lines = [_req("tools/list", req_id=1)]
+    responses = await _run(server, lines)
+    tools = {t["name"]: t for t in responses[0]["result"]["tools"]}
+
+    mc_desc = tools["module_callers"]["description"]
+    mce_desc = tools["module_callees"]["description"]
+
+    assert "prefix" in mc_desc.lower(), "module_callers description must mention 'prefix'"
+    assert "truncated" in mc_desc.lower(), "module_callers description must mention truncation"
+    assert "prefix" in mce_desc.lower(), "module_callees description must mention 'prefix'"
+    assert "truncated" in mce_desc.lower(), "module_callees description must mention truncation"
 
 
 @pytest.mark.asyncio
@@ -928,11 +1002,12 @@ async def test_notification_handler_raises_silent(server: RpcServer):
 @pytest.mark.parametrize(
     "name,arguments,expect_error",
     [
-        # Wrong-type fqn / module: truthy values that aren't in the graph.
+        # Wrong-type fqn: truthy values that aren't in the graph.
         # _bfs handles unknown starts gracefully → empty list, isError:false.
         ("callers_of",     {"fqn": 123},                             False),
         ("callees_of",     {"fqn": 123},                             False),
-        ("module_callers", {"module": True},                         False),
+        # Non-string module: str.startswith raises TypeError → isError:true.
+        ("module_callers", {"module": True},                         True),
         # List-typed module: unhashable → TypeError on dict lookup → isError:true.
         ("module_callees", {"module": ["pkg", "mod"]},               True),
         # Non-string query: `.lower()` on dict raises AttributeError → isError:true.
