@@ -264,7 +264,7 @@ async def test_tool_search(server: RpcServer):
 
 @pytest.mark.asyncio
 async def test_tool_search_truncation(server: RpcServer):
-    """search with limit=1 on a fixture that has 2 'pkg' symbols triggers truncated=true."""
+    """search with limit=1 on a fixture that has 3 'pkg' symbols triggers truncated=true."""
     # The fixture has: pkg.mod.foo, pkg.mod.bar, pkg.other.baz — all contain "pkg"
     lines = [_req("tools/call", {"name": "search", "arguments": {"query": "pkg", "limit": 1}}, req_id=1)]
     responses = await _run(server, lines)

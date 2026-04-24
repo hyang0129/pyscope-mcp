@@ -160,7 +160,7 @@ class CallGraphIndex:
     def module_callees(self, module: str, depth: int = 1) -> list[str]:
         return _bfs(self.module_graph, module, depth)
 
-    def search(self, substring: str, limit: int = 50) -> dict:
+    def search(self, substring: str, limit: int = 50) -> dict[str, object]:
         """Substring search over known fully-qualified function names.
 
         Returns a dict with:

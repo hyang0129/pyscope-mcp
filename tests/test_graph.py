@@ -59,3 +59,9 @@ def test_search_truncation() -> None:
     assert len(result_all["results"]) == 5
     assert result_all["truncated"] is False
     assert result_all["total_matched"] == 5
+
+    # Cap exactly equal to match count — truncated must be False (condition is total > limit, not >=)
+    result_exact = idx.search("fn", limit=5)
+    assert len(result_exact["results"]) == 5
+    assert result_exact["truncated"] is False
+    assert result_exact["total_matched"] == 5

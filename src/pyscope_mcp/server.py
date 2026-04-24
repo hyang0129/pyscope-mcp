@@ -121,7 +121,7 @@ _TOOL_LIST = [
         "name": "search",
         "description": (
             "Substring search over known fully-qualified function names. "
-            "Results are capped at 50; use a more specific query if `truncated` is true. "
+            "Results are capped at `limit` (default 50); use a more specific query if `truncated` is true. "
             "Returns {results: [...], truncated: bool, total_matched: int}."
         ),
         "inputSchema": {
