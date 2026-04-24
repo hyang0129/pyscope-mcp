@@ -26,11 +26,106 @@ def _warn(msg: str) -> None:
     print(f"[pyscope-mcp] {msg}", file=sys.stderr)
 
 
+def _extract_skeletons(
+    root: Path,
+    parsed: list[tuple[str, ast.Module, Path, dict[str, str]]],
+) -> dict[str, list[dict]]:
+    """Extract symbol skeletons (fqn, kind, signature, lineno) from parsed ASTs.
+
+    Skeleton data is keyed by file path relative to ``root``.  Each entry is a
+    list of SymbolSummary-compatible dicts sorted by lineno.
+
+    Only top-level functions, top-level classes, and methods (functions defined
+    directly inside a class body) are included.  Nested functions inside other
+    functions are excluded — they are not part of the public structural surface.
+
+    The ``signature`` field is the first ``def`` or ``class`` line only — no body.
+    """
+    skeletons: dict[str, list[dict]] = {}
+    for module_fqn, tree, file_path, _import_table in parsed:
+        try:
+            rel = str(file_path.relative_to(root))
+        except ValueError:
+            rel = str(file_path)
+
+        symbols: list[dict] = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            # Only process top-level nodes and methods (depth == 1 inside a class)
+            # We iterate ast.walk which is unordered; we need explicit parent traversal.
+            break  # exit early — we do explicit traversal below
+
+        # Explicit two-level traversal: top-level defs + class bodies
+        for top_node in ast.iter_child_nodes(tree):
+            if isinstance(top_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = top_node.name
+                fqn = f"{module_fqn}.{name}"
+                sig = _first_def_line(top_node)
+                symbols.append({
+                    "fqn": fqn,
+                    "kind": "function",
+                    "signature": sig,
+                    "lineno": top_node.lineno,
+                })
+            elif isinstance(top_node, ast.ClassDef):
+                cls_name = top_node.name
+                cls_fqn = f"{module_fqn}.{cls_name}"
+                symbols.append({
+                    "fqn": cls_fqn,
+                    "kind": "class",
+                    "signature": _first_def_line(top_node),
+                    "lineno": top_node.lineno,
+                })
+                # Methods inside the class body (one level deep)
+                for class_node in ast.iter_child_nodes(top_node):
+                    if isinstance(class_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        method_name = class_node.name
+                        method_fqn = f"{cls_fqn}.{method_name}"
+                        symbols.append({
+                            "fqn": method_fqn,
+                            "kind": "method",
+                            "signature": _first_def_line(class_node),
+                            "lineno": class_node.lineno,
+                        })
+
+        symbols.sort(key=lambda s: s["lineno"])
+        skeletons[rel] = symbols
+
+    return skeletons
+
+
+def _first_def_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> str:
+    """Return the first line of the def/class statement as a signature string.
+
+    We reconstruct from the AST rather than slicing source lines so that the
+    pipeline stays stateless (no need to pass raw source strings around).
+    The result is ``def name(args...):`` or ``class Name(bases...):`` — no body.
+    """
+    if isinstance(node, ast.ClassDef):
+        bases = ", ".join(ast.unparse(b) for b in node.bases)
+        base_str = f"({bases})" if bases else ""
+        return f"class {node.name}{base_str}:"
+
+    # FunctionDef / AsyncFunctionDef
+    prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+    args_str = ast.unparse(node.args)
+    ret = ""
+    if node.returns is not None:
+        ret = f" -> {ast.unparse(node.returns)}"
+    return f"{prefix} {node.name}({args_str}){ret}:"
+
+
 def build_with_report(
     root: str | Path,
     package: str,
-) -> tuple[dict[str, list[str]], dict]:
-    """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict)."""
+) -> tuple[dict[str, list[str]], dict, dict[str, list[dict]]]:
+    """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict, skeletons).
+
+    ``skeletons`` maps relative file paths to pre-computed symbol lists suitable
+    for storage in the index under the ``skeletons`` key (version 2 schema).
+    """
     root = Path(root)
     pkg_root = root / package if (root / package).is_dir() else root
 
@@ -111,7 +206,8 @@ def build_with_report(
 
     raw = {caller: sorted(callees) for caller, callees in sorted(all_edges.items())}
     report = miss_log.to_dict(raw, known_fqns)
-    return raw, report
+    skeletons = _extract_skeletons(root, parsed)
+    return raw, report, skeletons
 
 
 def build_raw(root: str | Path, package: str) -> dict[str, list[str]]:
@@ -119,5 +215,5 @@ def build_raw(root: str | Path, package: str) -> dict[str, list[str]]:
 
     Returns just the raw edge dict (public contract, unchanged).
     """
-    raw, _report = build_with_report(root, package)
+    raw, _report, _skeletons = build_with_report(root, package)
     return raw

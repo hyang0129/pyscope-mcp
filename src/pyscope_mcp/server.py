@@ -158,6 +158,31 @@ _TOOL_LIST = [
         },
         "annotations": {"readOnlyHint": True, "idempotentHint": True},
     },
+    {
+        "name": "file_skeleton",
+        "description": (
+            "Return all top-level functions, classes, and methods defined in the given file. "
+            "Input path must be relative to the repo root (e.g. 'agents/avatar_agent.py'). "
+            "Each symbol includes: fqn (fully-qualified name), kind (function|class|method), "
+            "signature (first def-line only, no body), and lineno. "
+            "Results are sorted by lineno and capped at 50; when the cap triggers, "
+            "`truncated` is true and `total` holds the full count. "
+            "If the file was added after the last build, returns isError:true — run "
+            "'pyscope-mcp build' then 'reload'. "
+            "Returns {results: [...], truncated: bool, total: int} or {isError: true, message: str}."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File path relative to the repo root, e.g. 'agents/avatar_agent.py'",
+                },
+            },
+            "required": ["path"],
+        },
+        "annotations": {"readOnlyHint": True, "idempotentHint": True},
+    },
 ]
 
 _TOOL_NAMES = {t["name"] for t in _TOOL_LIST}
@@ -268,6 +293,15 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
         if query is None:
             return _error_result("search requires 'query'")
         return _text(idx.search(query, int(arguments.get("limit", 50))))
+
+    if name == "file_skeleton":
+        path = arguments.get("path")
+        if not path:
+            return _error_result("file_skeleton requires 'path'")
+        result = idx.file_skeleton(path)
+        if result.get("isError"):
+            return {"content": [{"type": "text", "text": result["message"]}], "isError": True}
+        return _text(result)
 
     # Should never reach here — guarded by _TOOL_NAMES check above
     return _error_result(f"unknown tool: {name!r}")
