@@ -178,8 +178,8 @@ async def test_golden_handshake(server: RpcServer, tmp_index: Path):
     assert list_resp["id"] == 2
     tools = list_resp["result"]["tools"]
     tool_names = {t["name"] for t in tools}
-    assert tool_names == {"stats", "reload", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton"}
-    assert len(tools) == 8
+    assert tool_names == {"stats", "reload", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton", "neighborhood"}
+    assert len(tools) == 9
 
 
 @pytest.mark.asyncio
@@ -220,6 +220,13 @@ async def test_tool_callers_of(server: RpcServer):
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    # Must return dict shape, not bare list
+    assert isinstance(payload, dict), "callers_of must return a dict, not a bare list"
+    assert "results" in payload
+    assert "truncated" in payload
+    assert isinstance(payload["results"], list)
+    assert isinstance(payload["truncated"], bool)
 
 
 @pytest.mark.asyncio
@@ -228,6 +235,13 @@ async def test_tool_callees_of(server: RpcServer):
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    # Must return dict shape, not bare list
+    assert isinstance(payload, dict), "callees_of must return a dict, not a bare list"
+    assert "results" in payload
+    assert "truncated" in payload
+    assert isinstance(payload["results"], list)
+    assert isinstance(payload["truncated"], bool)
 
 
 @pytest.mark.asyncio
@@ -844,7 +858,7 @@ async def test_tools_list_ignores_cursor_and_omits_next_cursor(server: RpcServer
     result = responses[0]["result"]
     assert "tools" in result
     assert "nextCursor" not in result
-    assert len(result["tools"]) == 8
+    assert len(result["tools"]) == 9
 
 
 @pytest.mark.asyncio
@@ -1084,6 +1098,93 @@ async def test_reload_reflects_disk_change(server: RpcServer, tmp_index: Path):
     # Cleanup for subsequent tests (fixture owns _INDEX_PATH; leaving a modified
     # file behind is fine since reset_server_state rebuilds the fixture).
     _ = srv  # silence unused import
+
+
+# ---------------------------------------------------------------------------
+# neighborhood tool — RPC-level tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_happy_path(server: RpcServer):
+    """neighborhood returns a dict with required keys and no error."""
+    # fixture: pkg.mod.foo → pkg.mod.bar, pkg.other.baz → pkg.mod.foo
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {"symbol": "pkg.mod.foo"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "symbol" in payload
+    assert payload["symbol"] == "pkg.mod.foo"
+    assert "depth_full" in payload
+    assert "edges" in payload
+    assert isinstance(payload["edges"], list)
+    assert "truncated" in payload
+    assert isinstance(payload["truncated"], bool)
+    assert "token_budget_used" in payload
+    assert isinstance(payload["token_budget_used"], int)
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_edges_contain_neighbors(server: RpcServer):
+    """neighborhood edges include callee (foo→bar) and caller (baz→foo) directions."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {"symbol": "pkg.mod.foo", "depth": 2}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    edges = [tuple(e) for e in payload["edges"]]
+    assert ("pkg.mod.foo", "pkg.mod.bar") in edges  # callee direction
+    assert ("pkg.other.baz", "pkg.mod.foo") in edges  # caller direction
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_truncated_with_small_budget(server: RpcServer):
+    """neighborhood with token_budget=1 truncates and sets depth_truncated."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {
+        "symbol": "pkg.mod.foo", "token_budget": 1
+    }}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    # With token_budget=1 (4 chars), all edges should be dropped
+    assert payload["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_missing_symbol(server: RpcServer):
+    """neighborhood without symbol returns isError:true."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_unknown_symbol(server: RpcServer):
+    """neighborhood on a symbol not in the graph returns empty edges, not an error."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {"symbol": "not.in.graph"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert payload["edges"] == []
+    assert payload["truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_in_tool_list(server: RpcServer):
+    """neighborhood appears in tools/list with required fields."""
+    lines = [_req("tools/list", req_id=1)]
+    responses = await _run(server, lines)
+    tools = {t["name"]: t for t in responses[0]["result"]["tools"]}
+    assert "neighborhood" in tools
+    desc = tools["neighborhood"]["description"]
+    assert "truncated" in desc.lower()
+    assert "token_budget" in desc.lower()
+    schema = tools["neighborhood"]["inputSchema"]
+    assert "symbol" in schema["properties"]
+    assert "symbol" in schema["required"]
 
 
 # --- dependency-set invariant (durable replacement for the wall-clock budget) ---

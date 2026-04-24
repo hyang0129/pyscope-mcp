@@ -1,0 +1,57 @@
+"""Typed return shapes for all structured MCP tool responses.
+
+All TypedDicts here are used as return-type annotations in graph.py and as the
+canonical shapes that server.py serialises to JSON. Introducing this module when
+the neighborhood tool lands (issue #46) is intentional — a types.py earns its
+existence when it houses multiple TypedDicts together rather than one in isolation.
+"""
+
+from __future__ import annotations
+
+from typing import TypedDict
+
+
+class SearchResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.search`."""
+
+    results: list[str]
+    truncated: bool
+    total_matched: int
+
+
+class StatsResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.stats`."""
+
+    functions: int
+    function_edges: int
+    modules: int
+    module_edges: int
+
+
+class CallersResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.callers_of`."""
+
+    results: list[str]
+    truncated: bool
+
+
+class CalleesResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.callees_of`."""
+
+    results: list[str]
+    truncated: bool
+
+
+class NeighborhoodResult(TypedDict, total=False):
+    """Return shape for :meth:`CallGraphIndex.neighborhood`.
+
+    ``depth_truncated`` is present **only** when ``truncated=True``.
+    ``token_budget_used`` reflects the serialised character count / 4 (4 chars/token estimate).
+    """
+
+    symbol: str
+    depth_full: int
+    depth_truncated: int  # present only when truncated=True
+    edges: list[list[str]]  # list of [caller, callee] pairs
+    truncated: bool
+    token_budget_used: int
