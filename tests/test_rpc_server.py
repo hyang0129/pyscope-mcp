@@ -252,6 +252,42 @@ async def test_tool_search(server: RpcServer):
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    # Response must include truncation metadata
+    assert "results" in payload
+    assert "truncated" in payload
+    assert "total_matched" in payload
+    assert isinstance(payload["results"], list)
+    assert isinstance(payload["truncated"], bool)
+    assert isinstance(payload["total_matched"], int)
+
+
+@pytest.mark.asyncio
+async def test_tool_search_truncation(server: RpcServer):
+    """search with limit=1 on a fixture that has 3 'pkg' symbols triggers truncated=true."""
+    # The fixture has: pkg.mod.foo, pkg.mod.bar, pkg.other.baz — all contain "pkg"
+    lines = [_req("tools/call", {"name": "search", "arguments": {"query": "pkg", "limit": 1}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert payload["truncated"] is True
+    assert payload["total_matched"] == 3
+    assert len(payload["results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_search_not_truncated(server: RpcServer):
+    """search that returns fewer results than the cap has truncated=false."""
+    # "baz" matches only pkg.other.baz
+    lines = [_req("tools/call", {"name": "search", "arguments": {"query": "baz"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert payload["truncated"] is False
+    assert payload["total_matched"] == 1
+    assert payload["results"] == ["pkg.other.baz"]
 
 
 @pytest.mark.asyncio
