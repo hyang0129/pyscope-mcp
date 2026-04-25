@@ -406,21 +406,58 @@ class CallGraphIndex:
 
     _CALLERS_CALLEES_CAP = 50
 
+    def _rank_bfs_results(
+        self,
+        bfs_result: dict[str, int],
+        graph: _DiGraph | _DiGraphReverseView,
+    ) -> list[str]:
+        """Rank BFS result nodes by (hop_depth ASC, -total_degree DESC, fqn ASC).
+
+        ``total_degree`` = in-degree + out-degree of the result node in the
+        underlying function graph.  Uses the same ranking convention as
+        :meth:`neighborhood`.
+
+        For a ``_DiGraphReverseView``, the backing ``_DiGraph`` (``graph._g``)
+        is used to look up both in-degree and out-degree so the degree reflects
+        the real graph topology regardless of traversal direction.
+        """
+        # Resolve the underlying forward graph for degree computation.
+        fwd: _DiGraph = graph._g if isinstance(graph, _DiGraphReverseView) else graph  # type: ignore[assignment]
+
+        def total_degree(n: str) -> int:
+            out_deg = sum(1 for _ in fwd.successors(n))
+            in_deg = sum(1 for _ in fwd._pred.get(n, ()))
+            return out_deg + in_deg
+
+        degree_cache: dict[str, int] = {n: total_degree(n) for n in bfs_result}
+        return sorted(
+            bfs_result,
+            key=lambda n: (bfs_result[n], -degree_cache[n], n),
+        )
+
     def callers_of(self, fqn: str, depth: int = 1) -> CallersResult:
         """Return functions that (transitively, up to depth) call *fqn*.
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
+        ``dropped`` is the number of results cut by the cap (always present; 0
+        when the cap does not fire).  Results are ranked by
+        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 callers
+        always precede depth-2 ones regardless of alphabetical order.
         Response includes uniform staleness fields (``stale``, ``stale_files``,
         and optionally ``stale_action`` / ``index_stale_reason``) and a
         ``completeness`` field (``"complete"`` or ``"partial"``).
         """
-        all_results = _bfs(self.function_graph.reverse(copy=False), fqn, depth)
-        truncated = len(all_results) > self._CALLERS_CALLEES_CAP
-        results = all_results[: self._CALLERS_CALLEES_CAP]
+        rev_fg = self.function_graph.reverse(copy=False)
+        bfs_result = _bfs(rev_fg, fqn, depth)
+        ranked = self._rank_bfs_results(bfs_result, rev_fg)
+        dropped = max(0, len(ranked) - self._CALLERS_CALLEES_CAP)
+        truncated = dropped > 0
+        results = ranked[: self._CALLERS_CALLEES_CAP]
         staleness = self._staleness_for(results)
         return CallersResult(
             results=results,
             truncated=truncated,
+            dropped=dropped,
             completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
         )
@@ -429,17 +466,25 @@ class CallGraphIndex:
         """Return functions (transitively, up to depth) called by *fqn*.
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
+        ``dropped`` is the number of results cut by the cap (always present; 0
+        when the cap does not fire).  Results are ranked by
+        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 callees
+        always precede depth-2 ones regardless of alphabetical order.
         Response includes uniform staleness fields (``stale``, ``stale_files``,
         and optionally ``stale_action`` / ``index_stale_reason``) and a
         ``completeness`` field (``"complete"`` or ``"partial"``).
         """
-        all_results = _bfs(self.function_graph, fqn, depth)
-        truncated = len(all_results) > self._CALLERS_CALLEES_CAP
-        results = all_results[: self._CALLERS_CALLEES_CAP]
+        fg = self.function_graph
+        bfs_result = _bfs(fg, fqn, depth)
+        ranked = self._rank_bfs_results(bfs_result, fg)
+        dropped = max(0, len(ranked) - self._CALLERS_CALLEES_CAP)
+        truncated = dropped > 0
+        results = ranked[: self._CALLERS_CALLEES_CAP]
         staleness = self._staleness_for(results)
         return CalleesResult(
             results=results,
             truncated=truncated,
+            dropped=dropped,
             completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
         )
@@ -643,14 +688,42 @@ class CallGraphIndex:
 
         return result
 
+    def _rank_module_bfs_results(
+        self,
+        bfs_result: dict[str, int],
+        module_graph: _DiGraph,
+    ) -> list[str]:
+        """Rank module BFS result nodes by (hop_depth ASC, -total_degree DESC, fqn ASC).
+
+        ``total_degree`` = in-degree + out-degree of the result module node in
+        *module_graph*.  Uses the same ranking convention as :meth:`neighborhood`.
+        """
+        rev_mg = module_graph.reverse(copy=False)
+
+        def total_degree(n: str) -> int:
+            return (
+                sum(1 for _ in module_graph.successors(n))
+                + sum(1 for _ in rev_mg.successors(n))
+            )
+
+        degree_cache: dict[str, int] = {n: total_degree(n) for n in bfs_result}
+        return sorted(
+            bfs_result,
+            key=lambda n: (bfs_result[n], -degree_cache[n], n),
+        )
+
     def module_callers(self, module: str, depth: int = 1) -> ModuleResult:
         """Return callers of all modules whose FQN starts with *module* (prefix query).
 
         An exact FQN is a degenerate prefix and behaves identically to the
         pre-change implementation.  Results are capped at 50 items; the
         ``truncated`` key in the returned dict signals when the cap triggers.
+        ``dropped`` is the number of results cut by the cap (always present; 0
+        when the cap does not fire).  Results are ranked by
+        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 module
+        callers always precede depth-2 ones regardless of alphabetical order.
         An empty-string prefix matches all modules.  A prefix that matches no
-        module nodes returns ``{"results": [], "truncated": false, "stale": ..., "stale_files": []}``.
+        module nodes returns ``{"results": [], "truncated": false, "dropped": 0, ...}``.
 
         Staleness is result-scoped: module FQNs are expanded to file paths via
         prefix-matching against ``_fqn_to_file`` (find all symbol FQNs that start
@@ -660,12 +733,17 @@ class CallGraphIndex:
         base = _prefix_module_bfs(
             self.module_graph.reverse(copy=False), self.module_graph, module, depth
         )
-        result_modules: list[str] = base["results"]  # type: ignore[assignment]
+        raw_union: dict[str, int] = base["results"]  # type: ignore[assignment]
+        ranked = self._rank_module_bfs_results(raw_union, self.module_graph)
+        cap = _MODULE_BFS_CAP
+        dropped: int = base["dropped"]  # type: ignore[assignment]
+        result_modules = ranked[:cap]
         staleness = self._staleness_for_modules(result_modules)
         symbol_fqns = self._expand_modules_to_symbols(result_modules)
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
+            dropped=dropped,
             completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
         )
@@ -674,15 +752,24 @@ class CallGraphIndex:
         """Return callees of all modules whose FQN starts with *module* (prefix query).
 
         Symmetric to :meth:`module_callers` — see its docstring for semantics.
+        ``dropped`` is the number of results cut by the cap (always present; 0
+        when the cap does not fire).  Results are ranked by
+        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 module
+        callees always precede depth-2 ones regardless of alphabetical order.
         Completeness is computed over the expanded symbol FQNs of the result modules.
         """
         base = _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
-        result_modules: list[str] = base["results"]  # type: ignore[assignment]
+        raw_union: dict[str, int] = base["results"]  # type: ignore[assignment]
+        ranked = self._rank_module_bfs_results(raw_union, self.module_graph)
+        cap = _MODULE_BFS_CAP
+        dropped: int = base["dropped"]  # type: ignore[assignment]
+        result_modules = ranked[:cap]
         staleness = self._staleness_for_modules(result_modules)
         symbol_fqns = self._expand_modules_to_symbols(result_modules)
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
+            dropped=dropped,
             completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
         )
@@ -794,46 +881,57 @@ def _prefix_module_bfs(
     Results from each matched seed node are unioned and deduplicated.  The matched
     seed nodes themselves are excluded from the result set (same semantics as _bfs).
     Results are capped at *cap*; ``truncated`` reflects whether the full union
-    exceeded the cap.
+    exceeded the cap.  ``dropped`` is the number of results cut by the cap (always
+    present; 0 when the cap does not fire).
+
+    When a result node is reachable from multiple seeds, its hop depth is the
+    minimum across all seeds (closest path wins).
 
     ``prefix=""`` matches all module nodes.
     """
     # Collect all module nodes that start with the given prefix
     matched_seeds = [n for n in node_graph.nodes if n.startswith(prefix)]
 
-    # Union BFS results across all matched seeds, excluding the seeds themselves
+    # Union BFS results across all matched seeds, excluding the seeds themselves.
+    # Track min hop depth per result node.
     seed_set = set(matched_seeds)
-    union: set[str] = set()
+    union: dict[str, int] = {}  # fqn -> min hop depth
     for seed in matched_seeds:
-        for node in _bfs(query_graph, seed, depth):
+        for node, hop in _bfs(query_graph, seed, depth).items():
             if node not in seed_set:
-                union.add(node)
+                if node not in union or hop < union[node]:
+                    union[node] = hop
 
-    results_all = sorted(union)
-    truncated = len(results_all) > cap
+    dropped = max(0, len(union) - cap)
+    truncated = dropped > 0
     return {
-        "results": results_all[:cap],
+        "results": union,  # raw dict returned; callers apply ranking + slice
         "truncated": truncated,
+        "dropped": dropped,
     }
 
 
-def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> list[str]:
+def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> dict[str, int]:
     """BFS from *start* up to *depth* hops.
 
-    ``depth=0`` returns ``[]``.  ``depth=1`` returns direct neighbours only.
+    ``depth=0`` returns ``{}``.  ``depth=1`` returns direct neighbours only.
     ``depth=N`` returns all nodes reachable within N hops (excluding *start*).
+
+    Returns a ``dict[fqn, min_hop_depth]`` mapping each reachable FQN to its
+    minimum hop distance from *start*.  The traversal set is identical to the
+    previous ``sorted(seen)`` implementation; only ordering and depth metadata
+    are new.
     """
     if depth <= 0 or start not in g:
-        return []
-    seen: set[str] = {start}
+        return {}
+    seen: dict[str, int] = {}
     frontier = [start]
-    for _ in range(depth):
+    for hop in range(1, depth + 1):
         nxt: list[str] = []
         for n in frontier:
             for s in g.successors(n):
-                if s not in seen:
-                    seen.add(s)
+                if s not in seen and s != start:
+                    seen[s] = hop
                     nxt.append(s)
         frontier = nxt
-    seen.discard(start)
-    return sorted(seen)
+    return seen
