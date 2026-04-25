@@ -265,13 +265,13 @@ def test_save_load_roundtrip_with_skeletons(tmp_path: Path) -> None:
     assert result["truncated"] is False
 
 
-def test_save_version_is_3(tmp_path: Path) -> None:
-    """Saved index must have version=3 (bumped from 2 in this release)."""
+def test_save_version_is_4(tmp_path: Path) -> None:
+    """Saved index must have version=4 (bumped from 3 to carry missed_callers)."""
     idx = CallGraphIndex.from_raw("/tmp/test", {})
     out = tmp_path / "index.json"
     idx.save(out)
     payload = _json.loads(out.read_text())
-    assert payload["version"] == 3
+    assert payload["version"] == 4
 
 
 def test_save_includes_file_shas(tmp_path: Path) -> None:
@@ -295,40 +295,43 @@ def test_save_load_roundtrip_file_shas(tmp_path: Path) -> None:
     assert loaded.file_shas == shas
 
 
-def test_load_version_1_backward_compat(tmp_path: Path) -> None:
-    """Version 1 index loads successfully; file_shas is None (pre-v3 sentinel)."""
+def test_load_version_1_raises(tmp_path: Path) -> None:
+    """Version 1 index raises a clear error naming v4 (no backward compat)."""
     payload = {"version": 1, "root": "/tmp/test", "raw": {}, "skeletons": {"any.py": []}}
     out = tmp_path / "v1_index.json"
     out.write_text(_json.dumps(payload))
 
-    loaded = CallGraphIndex.load(out)
-    assert loaded.skeletons == {"any.py": []}
-    assert loaded.file_shas is None
-    # Querying any known path on a pre-v3 index → stale: index_format_incompatible (uniform shape)
-    result = loaded.file_skeleton("any.py")
-    assert result["stale"] is True
-    assert result["stale_files"] == []
-    assert result["index_stale_reason"] == "index_format_incompatible"
-    assert "staleness_info" not in result
+    with pytest.raises(ValueError, match="v4"):
+        CallGraphIndex.load(out)
 
 
-def test_load_version_2_backward_compat(tmp_path: Path) -> None:
-    """Version 2 index loads successfully; file_shas is None (pre-v3 sentinel)."""
+def test_load_version_2_raises(tmp_path: Path) -> None:
+    """Version 2 index raises a clear error naming v4 (no backward compat)."""
     payload = {"version": 2, "root": "/tmp/test", "raw": {}, "skeletons": {}}
     out = tmp_path / "v2_index.json"
     out.write_text(_json.dumps(payload))
 
-    loaded = CallGraphIndex.load(out)
-    assert loaded.file_shas is None
+    with pytest.raises(ValueError, match="v4"):
+        CallGraphIndex.load(out)
+
+
+def test_load_version_3_raises(tmp_path: Path) -> None:
+    """Version 3 index raises a clear error naming v4 (no backward compat)."""
+    payload = {"version": 3, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
+    out = tmp_path / "v3_index.json"
+    out.write_text(_json.dumps(payload))
+
+    with pytest.raises(ValueError, match="v4"):
+        CallGraphIndex.load(out)
 
 
 def test_load_version_future_raises(tmp_path: Path) -> None:
-    """Version > 3 raises ValueError (unknown format)."""
-    payload = {"version": 4, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
-    out = tmp_path / "v4_index.json"
+    """Unknown version > 4 raises ValueError."""
+    payload = {"version": 5, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
+    out = tmp_path / "v5_index.json"
     out.write_text(_json.dumps(payload))
 
-    with pytest.raises(ValueError, match="unsupported index version: 4"):
+    with pytest.raises(ValueError, match="v4"):
         CallGraphIndex.load(out)
 
 

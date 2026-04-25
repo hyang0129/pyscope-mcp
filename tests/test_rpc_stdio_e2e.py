@@ -319,10 +319,11 @@ def test_file_skeleton_build_serve_e2e(tmp_path: Path) -> None:
     )
     assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
 
-    # 3. Index is version 3 and contains skeletons + file_shas for core.py
+    # 3. Index is version 4 and contains skeletons + file_shas + missed_callers for core.py
     payload = json.loads(index_file.read_text())
-    assert payload["version"] == 3
-    assert "file_shas" in payload, "version 3 index must contain file_shas"
+    assert payload["version"] == 4
+    assert "file_shas" in payload, "version 4 index must contain file_shas"
+    assert "missed_callers" in payload, "version 4 index must contain missed_callers"
     rel = "mypkg/core.py"
     assert rel in payload["skeletons"], (
         f"expected '{rel}' in skeletons; got keys: {list(payload['skeletons'])}"

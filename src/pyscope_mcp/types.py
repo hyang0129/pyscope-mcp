@@ -8,7 +8,16 @@ existence when it houses multiple TypedDicts together rather than one in isolati
 
 from __future__ import annotations
 
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
+
+# Two-state completeness signal for every edge-traversing tool response.
+# "complete"  — none of the traversed FQNs appear in missed_callers (directly
+#               or via class-prefix match).  The result is probably the full picture.
+# "partial"   — at least one traversed FQN is directly in missed_callers, OR is
+#               a method (≥3 dotted segments) whose class prefix (e.g. a.b.C for
+#               a.b.C.method) matches a missed_callers key.  The result is
+#               definitely or likely incomplete — widen with grep.
+Completeness = Literal["complete", "partial"]
 
 
 class SearchResult(TypedDict):
@@ -37,6 +46,7 @@ class CallersResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    completeness: Completeness
     stale: bool
     stale_files: list[str]
     stale_action: NotRequired[str]
@@ -48,6 +58,7 @@ class CalleesResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    completeness: Completeness
     stale: bool
     stale_files: list[str]
     stale_action: NotRequired[str]
@@ -60,6 +71,7 @@ class ModuleResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    completeness: Completeness
     stale: bool
     stale_files: list[str]
     stale_action: NotRequired[str]
@@ -74,7 +86,7 @@ class NeighborhoodResult(TypedDict, total=False):
     ``depth_truncated`` is present **only** when ``truncated=True``; it is
     absent from the dict when ``truncated=False``.
     ``stale_action`` is present only when ``stale=True``.
-    ``index_stale_reason`` is present only on the pre-v3 index path.
+    ``index_stale_reason`` is present only on the pre-v3 (pre-v4) index path.
 
     ``total=False`` is used (rather than a base-class split) because multiple
     fields must be omitted entirely when not applicable — ``NotRequired`` marks
@@ -91,6 +103,7 @@ class NeighborhoodResult(TypedDict, total=False):
     edges: list[list[str]]  # list of [caller, callee] pairs
     truncated: bool
     token_budget_used: int
+    completeness: Completeness
     stale: bool
     stale_files: list[str]
     stale_action: NotRequired[str]

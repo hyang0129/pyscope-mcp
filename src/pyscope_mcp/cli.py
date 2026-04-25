@@ -61,7 +61,22 @@ def cmd_build(args: argparse.Namespace) -> int:
     from pyscope_mcp.analyzer import build_with_report
 
     raw, miss_report, skeletons, file_shas = build_with_report(root, package=package or root.name)
-    idx = CallGraphIndex.from_raw(root, raw, skeletons=skeletons, file_shas=file_shas)
+
+    # Inline missed_callers into index.json at build time (Law 3: single artifact).
+    # Aggregate per-caller pattern counts from the flat unresolved_calls list.
+    # The miss_report["unresolved_calls"] is a flat list of dicts with keys:
+    #   "caller", "pattern", "file", "line", "snippet"
+    missed_callers: dict[str, dict[str, int]] = {}
+    for entry in miss_report.get("unresolved_calls", []):
+        caller = entry["caller"]
+        pattern = entry["pattern"]
+        if caller not in missed_callers:
+            missed_callers[caller] = {}
+        missed_callers[caller][pattern] = missed_callers[caller].get(pattern, 0) + 1
+
+    idx = CallGraphIndex.from_raw(
+        root, raw, skeletons=skeletons, file_shas=file_shas, missed_callers=missed_callers
+    )
     idx.save(out)
 
     # Write misses sidecar next to index.json

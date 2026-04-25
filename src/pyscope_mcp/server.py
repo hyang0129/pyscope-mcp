@@ -72,7 +72,12 @@ _TOOL_LIST = [
             "Results are capped at 50; when the cap triggers, `truncated` is true. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
-            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one result FQN has unresolved static-dispatch calls "
+            "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
+            "treating the result as exhaustive. "
+            "'complete' means no result FQN (or its class siblings) appears in the miss log. "
+            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -91,7 +96,12 @@ _TOOL_LIST = [
             "Results are capped at 50; when the cap triggers, `truncated` is true. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
-            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one result FQN has unresolved static-dispatch calls "
+            "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
+            "treating the result as exhaustive. "
+            "'complete' means no result FQN (or its class siblings) appears in the miss log. "
+            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -115,7 +125,11 @@ _TOOL_LIST = [
             "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
-            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one symbol in the result modules has unresolved "
+            "static-dispatch calls — verify with grep before treating as exhaustive. "
+            "'complete' means no symbol in the result modules appears in the miss log. "
+            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -142,7 +156,11 @@ _TOOL_LIST = [
             "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
-            "Returns {results: [...], truncated: bool, stale: bool, stale_files: [...]}."
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one symbol in the result modules has unresolved "
+            "static-dispatch calls — verify with grep before treating as exhaustive. "
+            "'complete' means no symbol in the result modules appears in the miss log. "
+            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -219,8 +237,12 @@ _TOOL_LIST = [
             "Default token_budget=1000. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one FQN in the neighborhood has unresolved "
+            "static-dispatch calls — verify with grep before treating as exhaustive. "
+            "'complete' means no FQN in the neighborhood appears in the miss log. "
             "Returns {symbol, depth_full, depth_truncated?, edges: [[caller, callee], ...], "
-            "truncated: bool, token_budget_used: int, stale: bool, stale_files: [...]}."
+            "truncated: bool, token_budget_used: int, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
