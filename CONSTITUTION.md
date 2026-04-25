@@ -203,6 +203,20 @@ failure on one file skips that file, warns, and keeps going. Required by Law 4
 (one bad file can't blow the 60 s budget by aborting the run) and Law 1 (a partial
 index of definite edges still satisfies the contract).
 
+**Corollary 1.3 / 4.3** — On schema version mismatch, `load` raises a clear error
+and requires the user to re-run `build`. No migration shims. Synthesizing missing
+fields from an old index invents data the analyzer never produced (Law 1); the
+rebuild budget makes migration cost irrelevant (Law 4).
+
+**Anti-corollary to 1.3 / 4.3** — The same two laws also support the opposite
+position: additive schema changes (new optional fields with lossless structural
+defaults — no synthesized edges, no invented callees) can be migrated in `load`
+without violating Law 1, and doing so drives rebuild overhead to zero for minor
+bumps. The trade-off is build simplicity (no migration) vs. code complexity
+(versioned migration paths in `load`). This project chose build simplicity because
+the rebuild budget is small and migration code is a long-term maintenance surface;
+projects under tighter Law 4 pressure could defensibly invert the choice.
+
 **Convention (not a corollary)** — Dotted FQN as the primary symbol ID. Matches
 LSP and downstream code. Kept here for visibility but doesn't derive from a law;
 may move to `CLAUDE.md` during a later amendment pass.

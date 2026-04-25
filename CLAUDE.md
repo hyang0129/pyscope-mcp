@@ -91,7 +91,7 @@ Conventions when adding tools:
 - Python 3.10+ at minimum. The analyzer must run on 3.11+ cleanly.
 - Use `from __future__ import annotations`.
 - Dependencies stay minimal: **zero runtime deps for the serve path** (issue #40 removed `mcp`, `pydantic` and all their transitive deps: `httpx`, `anyio`, `jsonschema`, `pydantic_settings`). The JSON-RPC 2.0 stdio transport is hand-rolled in `src/pyscope_mcp/_rpc.py`. Do not add heavy deps without a reason — especially do not pull in unmaintained analysis libraries. (No pickle caches, no regex "parsers," no LSIF.) `networkx` was removed in #37 — graph.py uses a minimal inline `_DiGraph` backed by plain dicts.
-- Index file format is versioned (`{"version": 1, "root": ..., "raw": {...}}`). Bump the version if the schema changes and handle old versions in `CallGraphIndex.load`.
+- Index file format is versioned (`{"version": 1, "root": ..., "raw": {...}}`). Bump `INDEX_VERSION` if the schema changes. On version mismatch, `load` raises a clear error telling the user to re-run `build`. No migration shims — old indexes are invalid, not migrateable (see Corollary 1.3 / 4.3 in CONSTITUTION.md).
 - `reload` is the only way the running server picks up a new index — no filesystem watching.
 - JSON on disk is fine while indexes are small and human-inspectable. If we outgrow it, move to SQLite + FTS5 before anything more exotic. SCIP export is a later option for Sourcegraph interop; not a v1 concern.
 
