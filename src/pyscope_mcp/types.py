@@ -95,6 +95,14 @@ class NeighborhoodResult(TypedDict, total=False):
 
     ``token_budget_used`` reflects the serialised character count / 4
     (4 chars/token estimate).
+
+    Hub suppression fields (always present — never ``NotRequired``):
+    ``hub_suppressed`` is a list of FQNs whose caller-side expansion was
+    skipped because their in-degree exceeded the threshold. Always present;
+    empty list when no suppression occurred. ``hub_threshold`` is the
+    in-degree threshold that was applied for this query (the cached default
+    or the per-call override). Consumers can reproduce or override the
+    decision using these fields.
     """
 
     symbol: str
@@ -104,6 +112,8 @@ class NeighborhoodResult(TypedDict, total=False):
     truncated: bool
     token_budget_used: int
     completeness: Completeness
+    hub_suppressed: list[str]  # always present; empty when no suppression
+    hub_threshold: int  # in-degree threshold applied for this query
     stale: bool
     stale_files: list[str]
     stale_action: NotRequired[str]

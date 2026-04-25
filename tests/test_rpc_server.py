@@ -1192,6 +1192,67 @@ async def test_tool_neighborhood_in_tool_list(server: RpcServer):
     assert "symbol" in schema["required"]
 
 
+@pytest.mark.asyncio
+async def test_tool_neighborhood_schema_has_hub_params(server: RpcServer):
+    """neighborhood inputSchema includes expand_hubs and hub_threshold."""
+    lines = [_req("tools/list", req_id=1)]
+    responses = await _run(server, lines)
+    tools = {t["name"]: t for t in responses[0]["result"]["tools"]}
+    schema = tools["neighborhood"]["inputSchema"]
+    assert "expand_hubs" in schema["properties"], (
+        "expand_hubs must be declared in neighborhood inputSchema"
+    )
+    assert "hub_threshold" in schema["properties"], (
+        "hub_threshold must be declared in neighborhood inputSchema"
+    )
+    assert schema["properties"]["expand_hubs"]["type"] == "boolean"
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_response_has_hub_fields(server: RpcServer):
+    """neighborhood response always includes hub_suppressed and hub_threshold."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {"symbol": "pkg.mod.foo"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "hub_suppressed" in payload, "hub_suppressed must always be present"
+    assert "hub_threshold" in payload, "hub_threshold must always be present"
+    assert isinstance(payload["hub_suppressed"], list)
+    assert isinstance(payload["hub_threshold"], int)
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_expand_hubs_dispatched(server: RpcServer):
+    """expand_hubs=True is passed through to idx.neighborhood (hub_suppressed=[])."""
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {
+        "symbol": "pkg.mod.foo", "expand_hubs": True
+    }}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    # With expand_hubs=True, no hub suppression should occur on this small fixture
+    assert payload["hub_suppressed"] == []
+
+
+@pytest.mark.asyncio
+async def test_tool_neighborhood_hub_threshold_dispatched(server: RpcServer):
+    """hub_threshold parameter is passed through; response echoes the value."""
+    override = 999
+    lines = [_req("tools/call", {"name": "neighborhood", "arguments": {
+        "symbol": "pkg.mod.foo", "hub_threshold": override
+    }}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert payload["hub_threshold"] == override, (
+        f"hub_threshold in response should echo the override value {override}, "
+        f"got {payload['hub_threshold']}"
+    )
+
+
 # --- dependency-set invariant (durable replacement for the wall-clock budget) ---
 
 def test_no_heavy_deps_on_serve_path():

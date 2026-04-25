@@ -148,6 +148,9 @@ class CallGraphIndex:
     # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
     # Not serialised — rebuilt on every load.
     _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
+    # Computed at from_raw time: p99 of in-degree distribution, floor of 10.
+    # Used by neighborhood() for hub suppression. Not serialised — recomputed on load.
+    _in_degree_threshold: int = field(default=10, repr=False)
 
     @classmethod
     def from_raw(
@@ -176,6 +179,9 @@ class CallGraphIndex:
         for rel_path, symbols in skeletons.items():
             for sym in symbols:
                 fqn_to_file[sym["fqn"]] = rel_path
+        # Compute in-degree threshold: p99 of in-degree distribution, floor of 10.
+        # One-time O(N) cost at index load; cached for O(1) lookup during BFS.
+        in_degree_threshold = _compute_in_degree_threshold(fg)
         return cls(
             root=root,
             function_graph=fg,
@@ -185,6 +191,7 @@ class CallGraphIndex:
             file_shas=file_shas,
             missed_callers=missed_callers if missed_callers is not None else {},
             _fqn_to_file=fqn_to_file,
+            _in_degree_threshold=in_degree_threshold,
         )
 
     def save(self, path: str | Path) -> Path:
@@ -442,6 +449,8 @@ class CallGraphIndex:
         symbol: str,
         depth: int = 2,
         token_budget: int = 1000,
+        expand_hubs: bool = False,
+        hub_threshold: int | None = None,
     ) -> NeighborhoodResult:
         """Return a bounded bidirectional subgraph around *symbol*.
 
@@ -450,6 +459,18 @@ class CallGraphIndex:
         tiebreak — then truncated to fit within *token_budget* (4 chars/token
         estimate).
 
+        Hub suppression (default on):
+          Nodes whose in-degree exceeds *hub_threshold* (default: index-load-time
+          p99 of in-degree distribution, floor 10) are treated as utility hubs.
+          Their direct edges to/from the queried symbol are kept, but BFS does
+          not expand *through* them in the callers direction (in-degree only —
+          out-degree hubs are pipeline siblings and are expanded normally).
+          The queried *symbol* itself is exempt — calling neighborhood directly
+          on a hub still returns its full neighborhood.
+
+          Pass ``expand_hubs=True`` to disable suppression.  Pass a non-None
+          ``hub_threshold`` to override the cached threshold for this query.
+
         Response keys:
           - ``symbol``: the queried FQN
           - ``depth_full``: deepest level with all edges intact (no drops)
@@ -457,12 +478,19 @@ class CallGraphIndex:
           - ``edges``: list of ``[caller, callee]`` pairs
           - ``truncated``: True when the budget was hit
           - ``token_budget_used``: estimated tokens consumed (chars / 4)
+          - ``hub_suppressed``: list of FQNs whose caller expansion was skipped (always present)
+          - ``hub_threshold``: the in-degree threshold applied (always present)
 
         ``depth_full`` reflects the actual graph depth, not the declared *depth*
         parameter (if the graph is shallower, ``depth_full`` mirrors reality).
         """
         fg = self.function_graph
         rev_fg = fg.reverse(copy=False)
+
+        # Resolve effective threshold for this query
+        effective_threshold: int = (
+            self._in_degree_threshold if hub_threshold is None else hub_threshold
+        )
 
         # ------------------------------------------------------------------
         # Phase 1: bidirectional BFS — collect (caller, callee, hop_depth)
@@ -478,13 +506,16 @@ class CallGraphIndex:
         # Edge deduplication and depth tracking: maps (caller, callee) → min hop_depth
         edge_depths: dict[tuple[str, str], int] = {}  # min hop_depth for edge
 
+        # Collect hub nodes whose expansion was suppressed (in-degree only)
+        suppressed_hubs: set[str] = set()
+
         while frontier:
             node, d = frontier.popleft()
             if d >= depth:
                 continue
             next_d = d + 1
 
-            # Callees direction: node → callee
+            # Callees direction: node → callee (out-degree; always expand)
             for callee in fg.successors(node):
                 edge = (node, callee)
                 if edge not in edge_depths or edge_depths[edge] > next_d:
@@ -493,7 +524,23 @@ class CallGraphIndex:
                     node_depth[callee] = next_d
                     frontier.append((callee, next_d))
 
-            # Callers direction: caller → node
+            # Callers direction: caller → node (in-degree; hub suppression applies)
+            # A node is treated as a hub if its in-degree exceeds the threshold AND
+            # it is not the queried symbol itself (the queried symbol is always exempt).
+            node_in_degree = sum(1 for _ in rev_fg.successors(node))
+            is_hub = (
+                not expand_hubs
+                and node != symbol
+                and node_in_degree >= effective_threshold
+            )
+            if is_hub:
+                suppressed_hubs.add(node)
+                # Do not expand through hub callers — skip adding them to frontier.
+                # The edge from node's own callers back to node is still collected
+                # if node was reached as a direct neighbor; but we don't traverse
+                # further through the hub.
+                continue
+
             for caller in rev_fg.successors(node):
                 edge = (caller, node)
                 if edge not in edge_depths or edge_depths[edge] > next_d:
@@ -512,6 +559,8 @@ class CallGraphIndex:
                 truncated=False,
                 token_budget_used=0,
                 completeness=self.completeness_for([symbol]),
+                hub_suppressed=[],
+                hub_threshold=effective_threshold,
             )
             result.update(staleness)  # type: ignore[arg-type]
             return result
@@ -585,6 +634,8 @@ class CallGraphIndex:
             truncated=truncated,
             token_budget_used=chars_used // 4,
             completeness=self.completeness_for(unique_fqns),
+            hub_suppressed=sorted(suppressed_hubs),
+            hub_threshold=effective_threshold,
         )
         result.update(staleness)  # type: ignore[arg-type]
         if truncated and depth_truncated is not None:
@@ -698,6 +749,33 @@ class CallGraphIndex:
 
 
 _MODULE_BFS_CAP = 50
+
+_IN_DEGREE_THRESHOLD_FLOOR = 10
+
+
+def _compute_in_degree_threshold(fg: _DiGraph) -> int:
+    """Compute the in-degree hub-suppression threshold for *fg*.
+
+    Returns the p99 of the in-degree distribution across all nodes in the
+    function graph, with a floor of ``_IN_DEGREE_THRESHOLD_FLOOR`` (10).
+
+    If the graph has fewer than 2 nodes, returns the floor.
+
+    This is called once during ``CallGraphIndex.from_raw`` and the result is
+    cached on the index instance as ``_in_degree_threshold``.  Never called
+    per-query — see Law 2.
+    """
+    if fg.number_of_nodes() < 2:
+        return _IN_DEGREE_THRESHOLD_FLOOR
+    in_degrees = [len(fg._pred.get(n, ())) for n in fg.nodes]
+    in_degrees.sort()
+    n = len(in_degrees)
+    # p99 index: the value at the 99th percentile (upper inclusive)
+    p99_idx = int(0.99 * n)
+    if p99_idx >= n:
+        p99_idx = n - 1
+    p99 = in_degrees[p99_idx]
+    return max(_IN_DEGREE_THRESHOLD_FLOOR, p99)
 
 
 def _module_of(fqn: str) -> str:

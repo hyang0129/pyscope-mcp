@@ -235,6 +235,16 @@ _TOOL_LIST = [
             "level where dropping started, and `depth_full` indicates the deepest level with "
             "complete data. "
             "Default token_budget=1000. "
+            "Hub suppression (default on): nodes whose in-degree exceeds the computed threshold "
+            "(p99 of in-degree distribution, floor 10) are treated as utility hubs. "
+            "Their direct edges to the queried symbol are kept but BFS does not traverse further "
+            "through them in the callers direction, preventing lateral expansion through shared "
+            "utilities (e.g. call_llm, parse_json). "
+            "The queried symbol itself is always exempt. "
+            "Response always includes `hub_suppressed: list[str]` (FQNs of suppressed hub nodes; "
+            "empty when no suppression occurred) and `hub_threshold: int` (the threshold used). "
+            "Pass expand_hubs=true to disable suppression. Pass hub_threshold to override the "
+            "per-query threshold (the response hub_threshold field echoes the override). "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes `completeness: 'complete' | 'partial'`. "
@@ -242,7 +252,8 @@ _TOOL_LIST = [
             "static-dispatch calls — verify with grep before treating as exhaustive. "
             "'complete' means no FQN in the neighborhood appears in the miss log. "
             "Returns {symbol, depth_full, depth_truncated?, edges: [[caller, callee], ...], "
-            "truncated: bool, token_budget_used: int, completeness: str, stale: bool, stale_files: [...]}."
+            "truncated: bool, token_budget_used: int, completeness: str, "
+            "hub_suppressed: list[str], hub_threshold: int, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -263,6 +274,25 @@ _TOOL_LIST = [
                     "minimum": 1,
                     "default": 1000,
                     "description": "Maximum tokens to return (4 chars/token; default: 1000)",
+                },
+                "expand_hubs": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Disable hub suppression and return the full lateral traversal. "
+                        "hub_suppressed will be [] and hub_threshold still reports the computed value. "
+                        "Default: false (suppression on)."
+                    ),
+                },
+                "hub_threshold": {
+                    "type": ["integer", "null"],
+                    "default": None,
+                    "description": (
+                        "Override the in-degree threshold for hub suppression. "
+                        "Nodes with in-degree > hub_threshold are treated as hubs. "
+                        "The response hub_threshold field echoes the value used. "
+                        "Default: null (use index-level p99 threshold)."
+                    ),
                 },
             },
             "required": ["symbol"],
@@ -397,7 +427,10 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
             return _error_result("neighborhood requires 'symbol'")
         depth = int(arguments.get("depth", 2))
         token_budget = int(arguments.get("token_budget", 1000))
-        return _text(idx.neighborhood(symbol, depth, token_budget))
+        expand_hubs = bool(arguments.get("expand_hubs", False))
+        hub_threshold_raw = arguments.get("hub_threshold")
+        hub_threshold = int(hub_threshold_raw) if hub_threshold_raw is not None else None
+        return _text(idx.neighborhood(symbol, depth, token_budget, expand_hubs=expand_hubs, hub_threshold=hub_threshold))
 
     # Should never reach here — guarded by _TOOL_NAMES check above
     return _error_result(f"unknown tool: {name!r}")
