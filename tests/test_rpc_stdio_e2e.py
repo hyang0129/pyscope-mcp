@@ -319,11 +319,12 @@ def test_file_skeleton_build_serve_e2e(tmp_path: Path) -> None:
     )
     assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
 
-    # 3. Index is version 4 and contains skeletons + file_shas + missed_callers for core.py
+    # 3. Index is current version and contains skeletons + file_shas + missed_callers for core.py
+    from pyscope_mcp.graph import INDEX_VERSION
     payload = json.loads(index_file.read_text())
-    assert payload["version"] == 4
-    assert "file_shas" in payload, "version 4 index must contain file_shas"
-    assert "missed_callers" in payload, "version 4 index must contain missed_callers"
+    assert payload["version"] == INDEX_VERSION
+    assert "file_shas" in payload, "index must contain file_shas"
+    assert "missed_callers" in payload, "index must contain missed_callers"
     rel = "mypkg/core.py"
     assert rel in payload["skeletons"], (
         f"expected '{rel}' in skeletons; got keys: {list(payload['skeletons'])}"
@@ -609,8 +610,9 @@ def test_completeness_field_e2e(tmp_path: Path) -> None:
     )
     assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
 
+    from pyscope_mcp.graph import INDEX_VERSION
     payload = json.loads(index_file.read_text())
-    assert payload["version"] == 4, f"expected v4 index; got version={payload.get('version')}"
+    assert payload["version"] == INDEX_VERSION, f"expected v{INDEX_VERSION} index; got version={payload.get('version')}"
     assert "missed_callers" in payload, "index must contain missed_callers"
     # bar has an unresolvable getattr call — it must appear in missed_callers
     assert "mypkg.core.bar" in payload["missed_callers"], (

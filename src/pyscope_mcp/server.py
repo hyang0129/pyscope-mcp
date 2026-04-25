@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import logging
+import time
+import uuid
 from pathlib import Path
 
 from pyscope_mcp import __version__
@@ -33,6 +35,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _INDEX: CallGraphIndex | None = None
 _INDEX_PATH: Path | None = None
+
+# UUID generated once at module import (= server startup).
+# Since the MCP server is spawned per-session as a stdio subprocess,
+# this naturally partitions log entries by session.
+_SERVER_ID: str = str(uuid.uuid4())
 
 # ---------------------------------------------------------------------------
 # Server instance
@@ -371,15 +378,41 @@ async def _tools_call(id, params):  # noqa: A002
 
     if not isinstance(name, str) or name not in _TOOL_NAMES:
         # Unknown tool name → isError:true in result, NOT a JSON-RPC error
-        return _error_result(f"unknown tool: {name!r}")
+        result = _error_result(f"unknown tool: {name!r}")
+        from pyscope_mcp import _log
+        _log.log_call(
+            server_id=_SERVER_ID,
+            rpc_id=id,
+            tool=str(name),
+            args=arguments,
+            duration_ms=0,
+            result=result,
+            index=_INDEX,
+        )
+        return result
 
     try:
-        return await _dispatch_tool(name, arguments)
+        t0 = time.perf_counter()
+        result = await _dispatch_tool(name, arguments)
+        duration_ms = int((time.perf_counter() - t0) * 1000)
     except RpcError:
         raise  # propagate JSON-RPC level errors (e.g. missing index path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Tool %r raised: %s", name, exc)
-        return _error_result(str(exc))
+        result = _error_result(str(exc))
+        duration_ms = 0
+
+    from pyscope_mcp import _log
+    _log.log_call(
+        server_id=_SERVER_ID,
+        rpc_id=id,
+        tool=name,
+        args=arguments,
+        duration_ms=duration_ms,
+        result=result,
+        index=_INDEX,
+    )
+    return result
 
 
 async def _dispatch_tool(name: str, arguments: dict) -> dict:
@@ -460,4 +493,15 @@ def run_stdio(index_path: Path) -> None:
     global _INDEX_PATH, _INDEX
     _INDEX_PATH = Path(index_path)
     _INDEX = CallGraphIndex.load(_INDEX_PATH)
+
+    # Initialise query logger (no-op when PYSCOPE_MCP_LOG=0).
+    from pyscope_mcp import _log
+    import os
+    log_path_str = os.environ.get("PYSCOPE_MCP_LOG_PATH")
+    if log_path_str:
+        log_path = Path(log_path_str)
+    else:
+        log_path = _INDEX_PATH.parent / "query.jsonl"
+    _log.init(log_path)
+
     asyncio.run(_SERVER.run())
