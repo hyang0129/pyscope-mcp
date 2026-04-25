@@ -69,7 +69,11 @@ _TOOL_LIST = [
         "name": "callers_of",
         "description": (
             "List functions that (transitively, up to depth) call the given function. "
-            "Results are capped at 50; when the cap triggers, `truncated` is true. "
+            "Results are capped at 50 and ranked by (hop_depth ASC, -total_degree DESC, fqn ASC) "
+            "so depth-1 callers always appear before depth-2 ones. "
+            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
+            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
+            "and narrow your query or escalate accordingly. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes `completeness: 'complete' | 'partial'`. "
@@ -77,7 +81,7 @@ _TOOL_LIST = [
             "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
             "treating the result as exhaustive. "
             "'complete' means no result FQN (or its class siblings) appears in the miss log. "
-            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -93,7 +97,11 @@ _TOOL_LIST = [
         "name": "callees_of",
         "description": (
             "List functions (transitively, up to depth) called by the given function. "
-            "Results are capped at 50; when the cap triggers, `truncated` is true. "
+            "Results are capped at 50 and ranked by (hop_depth ASC, -total_degree DESC, fqn ASC) "
+            "so depth-1 callees always appear before depth-2 ones. "
+            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
+            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
+            "and narrow your query or escalate accordingly. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes `completeness: 'complete' | 'partial'`. "
@@ -101,7 +109,7 @@ _TOOL_LIST = [
             "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
             "treating the result as exhaustive. "
             "'complete' means no result FQN (or its class siblings) appears in the miss log. "
-            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,15 +129,19 @@ _TOOL_LIST = [
             "FQN (e.g. `pkg.mod`) for an exact match, or a package prefix "
             "(e.g. `pkg.agents`) to aggregate callers across all matching modules. "
             "An empty string matches all modules. "
-            "Results are capped at 50 and deduplicated; when the cap triggers, "
-            "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
+            "Results are capped at 50, deduplicated, and ranked by "
+            "(hop_depth ASC, -total_degree DESC, fqn ASC) so depth-1 module callers "
+            "always appear before depth-2 ones. "
+            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
+            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
+            "and narrow the prefix or escalate accordingly. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes `completeness: 'complete' | 'partial'`. "
             "'partial' means at least one symbol in the result modules has unresolved "
             "static-dispatch calls — verify with grep before treating as exhaustive. "
             "'complete' means no symbol in the result modules appears in the miss log. "
-            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",
@@ -152,15 +164,19 @@ _TOOL_LIST = [
             "FQN (e.g. `pkg.mod`) for an exact match, or a package prefix "
             "(e.g. `pkg.agents`) to aggregate callees across all matching modules. "
             "An empty string matches all modules. "
-            "Results are capped at 50 and deduplicated; when the cap triggers, "
-            "`truncated` is true — narrow the prefix or increase `depth` to explore further. "
+            "Results are capped at 50, deduplicated, and ranked by "
+            "(hop_depth ASC, -total_degree DESC, fqn ASC) so depth-1 module callees "
+            "always appear before depth-2 ones. "
+            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
+            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
+            "and narrow the prefix or escalate accordingly. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes `completeness: 'complete' | 'partial'`. "
             "'partial' means at least one symbol in the result modules has unresolved "
             "static-dispatch calls — verify with grep before treating as exhaustive. "
             "'complete' means no symbol in the result modules appears in the miss log. "
-            "Returns {results: [...], truncated: bool, completeness: str, stale: bool, stale_files: [...]}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...]}."
         ),
         "inputSchema": {
             "type": "object",

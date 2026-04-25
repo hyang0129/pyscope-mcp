@@ -160,7 +160,7 @@ def test_module_callers_truncation() -> None:
     # Build a graph where one "target" module has 60 distinct callers
     raw: dict[str, list[str]] = {}
     for i in range(60):
-        raw[f"callers.mod{i}.fn"] = [f"target.core.fn"]
+        raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
     raw["target.core.fn"] = []
     idx = CallGraphIndex.from_raw("/tmp/sample", raw)
     result = idx.module_callers("target")
@@ -258,6 +258,228 @@ def test_callees_of_truncation() -> None:
     result = idx.callees_of("source.mod.fn", depth=1)
     assert result["truncated"] is True
     assert len(result["results"]) == 50
+
+
+# ---------------------------------------------------------------------------
+# dropped field — callers_of / callees_of
+# ---------------------------------------------------------------------------
+
+def test_callers_of_dropped_zero_when_not_truncated() -> None:
+    """dropped=0 when results fit within cap."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    result = idx.callers_of("sample.b.helper", depth=1)
+    assert "dropped" in result
+    assert result["dropped"] == 0
+    assert result["truncated"] is False
+
+
+def test_callees_of_dropped_zero_when_not_truncated() -> None:
+    """dropped=0 when results fit within cap."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    result = idx.callees_of("sample.a.top", depth=1)
+    assert "dropped" in result
+    assert result["dropped"] == 0
+    assert result["truncated"] is False
+
+
+def test_callers_of_dropped_correct_when_truncated() -> None:
+    """dropped equals the number of results beyond the 50-item cap."""
+    raw: dict[str, list[str]] = {}
+    for i in range(57):
+        raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
+    raw["target.core.fn"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.callers_of("target.core.fn", depth=1)
+    assert result["truncated"] is True
+    assert len(result["results"]) == 50
+    assert result["dropped"] == 7
+
+
+def test_callees_of_dropped_correct_when_truncated() -> None:
+    """dropped equals the number of results beyond the 50-item cap."""
+    raw: dict[str, list[str]] = {
+        "source.mod.fn": [f"target.mod{i}.fn" for i in range(57)]
+    }
+    for i in range(57):
+        raw[f"target.mod{i}.fn"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.callees_of("source.mod.fn", depth=1)
+    assert result["truncated"] is True
+    assert len(result["results"]) == 50
+    assert result["dropped"] == 7
+
+
+# ---------------------------------------------------------------------------
+# Ranking: depth-1 results precede depth-2 when alphabetical order would invert
+# ---------------------------------------------------------------------------
+
+def _ranking_raw_callers() -> dict[str, list[str]]:
+    """Graph for ranking test.
+
+    target.fn is called by:
+      - depth-1 callers: z_depth1.mod.fn, y_depth1.mod.fn  (sort AFTER depth-2 alphabetically)
+      - depth-2 callers: a_depth2.mod.fn ... (55 of them, sort BEFORE depth-1 alphabetically)
+
+    Without ranking fix, the cap would keep 50 alphabetically-first a_depth2 callers and
+    drop the depth-1 z_depth1 and y_depth1 callers.  With the fix, depth-1 callers appear first.
+    """
+    raw: dict[str, list[str]] = {}
+    # depth-2 callers: call bridge.fn which calls target.fn
+    for i in range(55):
+        raw[f"a_depth2.mod{i}.fn"] = ["bridge.mod.fn"]
+    raw["bridge.mod.fn"] = ["target.fn"]
+    # depth-1 callers: directly call target.fn (sort alphabetically AFTER a_depth2)
+    raw["z_depth1.mod.fn"] = ["target.fn"]
+    raw["y_depth1.mod.fn"] = ["target.fn"]
+    raw["target.fn"] = []
+    return raw
+
+
+def test_callers_of_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
+    """Depth-1 callers appear before depth-2 callers in results, even when alphabetically later."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _ranking_raw_callers())
+    result = idx.callers_of("target.fn", depth=2)
+
+    # depth-1 callers must be present despite sorting alphabetically after a_depth2 nodes
+    assert "z_depth1.mod.fn" in result["results"], (
+        "depth-1 caller z_depth1.mod.fn absent — cap dropped it before depth-2 entries"
+    )
+    assert "y_depth1.mod.fn" in result["results"], (
+        "depth-1 caller y_depth1.mod.fn absent — cap dropped it before depth-2 entries"
+    )
+
+    # depth-1 callers must appear in the first part of the list
+    z_idx = result["results"].index("z_depth1.mod.fn")
+    y_idx = result["results"].index("y_depth1.mod.fn")
+    # All depth-2 nodes that appear must come after both depth-1 callers
+    for item in result["results"]:
+        if item.startswith("a_depth2"):
+            item_idx = result["results"].index(item)
+            assert item_idx > z_idx and item_idx > y_idx, (
+                f"depth-2 caller {item!r} at index {item_idx} appears before depth-1 callers"
+            )
+
+    # Total reachable: 55 a_depth2 + bridge.mod.fn + z_depth1.mod.fn + y_depth1.mod.fn = 58
+    # dropped = 58 - 50 = 8
+    assert result["dropped"] == 8
+    assert result["truncated"] is True
+    assert len(result["results"]) == 50
+
+
+def _ranking_raw_callees() -> dict[str, list[str]]:
+    """Symmetric to _ranking_raw_callers but for callees direction."""
+    raw: dict[str, list[str]] = {}
+    # source.fn calls bridge.mod.fn (depth-1 callee) which calls 55 a_depth2 callees
+    raw["source.fn"] = ["bridge.mod.fn", "z_depth1.mod.fn", "y_depth1.mod.fn"]
+    raw["bridge.mod.fn"] = [f"a_depth2.mod{i}.fn" for i in range(55)]
+    for i in range(55):
+        raw[f"a_depth2.mod{i}.fn"] = []
+    raw["z_depth1.mod.fn"] = []
+    raw["y_depth1.mod.fn"] = []
+    return raw
+
+
+def test_callees_of_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
+    """Depth-1 callees appear before depth-2 callees, even when alphabetically later."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _ranking_raw_callees())
+    result = idx.callees_of("source.fn", depth=2)
+
+    # depth-1 callees: bridge.mod.fn, z_depth1.mod.fn, y_depth1.mod.fn
+    assert "z_depth1.mod.fn" in result["results"], (
+        "depth-1 callee z_depth1.mod.fn absent"
+    )
+    assert "y_depth1.mod.fn" in result["results"], (
+        "depth-1 callee y_depth1.mod.fn absent"
+    )
+    assert "bridge.mod.fn" in result["results"], (
+        "depth-1 callee bridge.mod.fn absent"
+    )
+
+    # All three depth-1 callees must appear before depth-2 ones
+    depth1_max_idx = max(
+        result["results"].index(n)
+        for n in ["bridge.mod.fn", "z_depth1.mod.fn", "y_depth1.mod.fn"]
+    )
+    for item in result["results"]:
+        if item.startswith("a_depth2"):
+            item_idx = result["results"].index(item)
+            assert item_idx > depth1_max_idx, (
+                f"depth-2 callee {item!r} at index {item_idx} appears before depth-1 callees"
+            )
+
+
+# ---------------------------------------------------------------------------
+# dropped field — module_callers / module_callees
+# ---------------------------------------------------------------------------
+
+def test_module_callers_dropped_zero_when_not_truncated() -> None:
+    """module_callers: dropped=0 when results fit within cap."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _prefix_raw())
+    result = idx.module_callers("pkg.agents")
+    assert "dropped" in result
+    assert result["dropped"] == 0
+    assert result["truncated"] is False
+
+
+def test_module_callees_dropped_zero_when_not_truncated() -> None:
+    """module_callees: dropped=0 when results fit within cap."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _prefix_raw())
+    result = idx.module_callees("pkg.agents")
+    assert "dropped" in result
+    assert result["dropped"] == 0
+    assert result["truncated"] is False
+
+
+def test_module_callers_dropped_correct_when_truncated() -> None:
+    """module_callers: dropped equals number of results beyond cap."""
+    raw: dict[str, list[str]] = {}
+    for i in range(57):
+        raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
+    raw["target.core.fn"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.module_callers("target")
+    assert result["truncated"] is True
+    assert len(result["results"]) == 50
+    assert result["dropped"] == 7
+
+
+def test_module_callees_dropped_correct_when_truncated() -> None:
+    """module_callees: dropped equals number of results beyond cap."""
+    raw: dict[str, list[str]] = {
+        "source.mod.fn": [f"target.mod{i}.fn" for i in range(57)]
+    }
+    for i in range(57):
+        raw[f"target.mod{i}.fn"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.module_callees("source")
+    assert result["truncated"] is True
+    assert len(result["results"]) == 50
+    assert result["dropped"] == 7
+
+
+def test_module_callers_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
+    """Depth-1 module callers appear before depth-2 ones, even when alphabetically later."""
+    raw: dict[str, list[str]] = {}
+    # depth-2 module callers: a_depth2.modN.fn → bridge.mod.fn → target.fn
+    for i in range(55):
+        raw[f"a_depth2.mod{i}.fn"] = ["bridge.mod.fn"]
+    raw["bridge.mod.fn"] = ["target.fn"]
+    # depth-1 module callers: z_depth1.mod.fn → target.fn (alphabetically after a_depth2)
+    raw["z_depth1.mod.fn"] = ["target.fn"]
+    raw["y_depth1.mod.fn"] = ["target.fn"]
+    raw["target.fn"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.module_callers("target", depth=2)
+
+    assert "z_depth1.mod" in result["results"], (
+        "depth-1 module caller z_depth1.mod absent — ranking failed"
+    )
+    assert "y_depth1.mod" in result["results"], (
+        "depth-1 module caller y_depth1.mod absent — ranking failed"
+    )
+    assert result["truncated"] is True
+    # 55 a_depth2 modules + bridge.mod + z_depth1.mod + y_depth1.mod = 58 - 50 = 8
+    assert result["dropped"] == 8
 
 
 # ---------------------------------------------------------------------------

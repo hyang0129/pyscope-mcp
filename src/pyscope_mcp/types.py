@@ -46,6 +46,7 @@ class CallersResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    dropped: int  # number of results cut by the cap; 0 when cap does not fire
     completeness: Completeness
     stale: bool
     stale_files: list[str]
@@ -58,6 +59,7 @@ class CalleesResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    dropped: int  # number of results cut by the cap; 0 when cap does not fire
     completeness: Completeness
     stale: bool
     stale_files: list[str]
@@ -71,6 +73,7 @@ class ModuleResult(TypedDict):
 
     results: list[str]
     truncated: bool
+    dropped: int  # number of results cut by the cap; 0 when cap does not fire
     completeness: Completeness
     stale: bool
     stale_files: list[str]
