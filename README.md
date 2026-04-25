@@ -54,3 +54,56 @@ Errors out if no index exists. Env-var equivalents: `PYSCOPE_MCP_ROOT`, `PYSCOPE
   }
 }
 ```
+
+## Query logging (opt-in)
+
+Every `tools/call` dispatch can append a structured JSONL entry to a local rotating log file so you can measure tool-use patterns, truncation rates, hub-suppression hits, and latency without parsing claude's session transcripts.
+
+**During pre-release the logger is enabled by default** (`PYSCOPE_MCP_LOG=1`). Before the first public release this default will flip to off.
+
+### Log location
+
+Default: `.pyscope-mcp/query.jsonl` next to the index file (already `.gitignore`d).  
+Override: `PYSCOPE_MCP_LOG_PATH=/abs/path/to/query.jsonl`.
+
+### Enable / disable
+
+```bash
+# Disable
+PYSCOPE_MCP_LOG=0 pyscope-mcp serve ...
+
+# Enable explicitly
+PYSCOPE_MCP_LOG=1 pyscope-mcp serve ...
+```
+
+### Log entry schema (v1)
+
+```json
+{
+  "v": 1,
+  "ts": "2026-04-25T21:00:00.000+00:00",
+  "server_id": "550e8400-e29b-41d4-a716-446655440000",
+  "rpc_id": 3,
+  "tool": "neighborhood",
+  "args": {"symbol": "pkg.mod.Foo.run", "depth": 2, "token_budget": 500},
+  "duration_ms": 12,
+  "is_error": false,
+  "truncated": true,
+  "result_count": null,
+  "edge_count": 7,
+  "hub_suppressed_count": 2,
+  "depth_full": 1,
+  "token_budget_used": 487,
+  "index_version": 5,
+  "index_git_sha": "a1b2c3d4...",
+  "index_content_hash": "abcdef12..."
+}
+```
+
+`server_id` partitions entries by session (the MCP server is spawned per-session as a stdio subprocess by Claude Code). To join log entries with claude's own session transcript, match by `(ts, tool, args)` or `rpc_id`.
+
+Rotation: files rotate at 10 MB; up to 5 historical files are kept (`query.jsonl.1` … `query.jsonl.5`), giving a ~50 MB ceiling.
+
+### Index schema v5 note
+
+The index format was bumped from v4 to v5 to add `git_sha` and `content_hash` header fields (used by the logger to tie each log entry to a specific graph version). Existing v4 index files are **not migrated** — re-run `pyscope-mcp build` to generate a v5 index.

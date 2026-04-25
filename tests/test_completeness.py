@@ -47,6 +47,7 @@ def _make_idx(
     missed_callers: dict[str, dict[str, int]] | None = None,
     skeletons: dict[str, list[SymbolSummary]] | None = None,
     file_shas: dict[str, str] | None = None,
+    git_sha: str | None = None,
 ) -> CallGraphIndex:
     return CallGraphIndex.from_raw(
         "/tmp/test",
@@ -54,6 +55,7 @@ def _make_idx(
         skeletons=skeletons or {},
         file_shas=file_shas or {},
         missed_callers=missed_callers or {},
+        git_sha=git_sha,
     )
 
 
@@ -339,11 +341,12 @@ class TestModuleCompleteness:
 
 
 # ---------------------------------------------------------------------------
-# 7. save/load v4 round-trip + v3 rejection
+# 7. save/load v5 round-trip + old-version rejection
 # ---------------------------------------------------------------------------
 
-class TestV4Schema:
-    def test_save_writes_version_4(self, tmp_path: Path) -> None:
+class TestV5Schema:
+    def test_save_writes_current_version(self, tmp_path: Path) -> None:
+        from pyscope_mcp.graph import INDEX_VERSION
         idx = _make_idx(
             {"pkg.mod.func": ["pkg.mod.other"]},
             missed_callers={"pkg.mod.func": {"getattr_nonliteral": 2}},
@@ -351,7 +354,7 @@ class TestV4Schema:
         out = tmp_path / "index.json"
         idx.save(out)
         payload = json.loads(out.read_text())
-        assert payload["version"] == 4
+        assert payload["version"] == INDEX_VERSION
 
     def test_save_writes_missed_callers(self, tmp_path: Path) -> None:
         missed = {"pkg.mod.func": {"getattr_nonliteral": 2, "bare_name_unresolved": 1}}
@@ -362,7 +365,16 @@ class TestV4Schema:
         assert "missed_callers" in payload
         assert payload["missed_callers"] == missed
 
-    def test_load_v4_populates_missed_callers(self, tmp_path: Path) -> None:
+    def test_save_writes_git_sha_and_content_hash(self, tmp_path: Path) -> None:
+        """v5: git_sha and content_hash are present in the saved payload."""
+        idx = _make_idx({"pkg.mod.func": []}, git_sha="deadbeef" * 5)
+        out = tmp_path / "index.json"
+        idx.save(out)
+        payload = json.loads(out.read_text())
+        assert payload["git_sha"] == "deadbeef" * 5
+        assert isinstance(payload["content_hash"], str) and len(payload["content_hash"]) == 64
+
+    def test_load_populates_missed_callers(self, tmp_path: Path) -> None:
         missed = {"pkg.mod.MyClass.foo": {"getattr_nonliteral": 3}}
         idx = _make_idx({}, missed_callers=missed)
         out = tmp_path / "index.json"
@@ -370,7 +382,7 @@ class TestV4Schema:
         loaded = CallGraphIndex.load(out)
         assert loaded.missed_callers == missed
 
-    def test_load_v4_completeness_for_works_after_roundtrip(self, tmp_path: Path) -> None:
+    def test_load_completeness_for_works_after_roundtrip(self, tmp_path: Path) -> None:
         missed = {"pkg.mod.MyClass.foo": {"getattr_nonliteral": 3}}
         idx = _make_idx({}, missed_callers=missed)
         out = tmp_path / "index.json"
@@ -379,7 +391,7 @@ class TestV4Schema:
         assert loaded.completeness_for(["pkg.mod.MyClass.bar"]) == "partial"
         assert loaded.completeness_for(["pkg.other.func"]) == "complete"
 
-    def test_load_v4_empty_missed_callers(self, tmp_path: Path) -> None:
+    def test_load_empty_missed_callers(self, tmp_path: Path) -> None:
         idx = _make_idx({}, missed_callers={})
         out = tmp_path / "index.json"
         idx.save(out)
@@ -387,8 +399,9 @@ class TestV4Schema:
         assert loaded.missed_callers == {}
         assert loaded.completeness_for(["anything"]) == "complete"
 
-    @pytest.mark.parametrize("old_version", [1, 2, 3])
+    @pytest.mark.parametrize("old_version", [1, 2, 3, 4])
     def test_load_rejects_old_versions(self, tmp_path: Path, old_version: int) -> None:
+        from pyscope_mcp.graph import INDEX_VERSION
         payload = {
             "version": old_version,
             "root": "/tmp/test",
@@ -398,12 +411,12 @@ class TestV4Schema:
         }
         out = tmp_path / "index.json"
         out.write_text(json.dumps(payload))
-        with pytest.raises(ValueError, match="v4"):
+        with pytest.raises(ValueError, match=f"v{old_version}"):
             CallGraphIndex.load(out)
 
     def test_load_rejects_unknown_version(self, tmp_path: Path) -> None:
         payload = {"version": 99, "root": "/tmp", "raw": {}, "skeletons": {}, "file_shas": {}}
         out = tmp_path / "index.json"
         out.write_text(json.dumps(payload))
-        with pytest.raises(ValueError, match="v4"):
+        with pytest.raises(ValueError, match="v99"):
             CallGraphIndex.load(out)

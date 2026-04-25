@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
+INDEX_VERSION = 5
+
 from pyscope_mcp.types import (
     CalleesResult,
     CallersResult,
@@ -121,6 +123,19 @@ class _DiGraphReverseView:
         )
 
 
+def _compute_content_hash(raw: dict[str, list[str]]) -> str:
+    """Return SHA-256 hex digest of the deterministically serialised *raw* dict.
+
+    Sorted keys and sorted callee lists ensure the same graph always yields
+    the same hash, regardless of insertion order.
+    """
+    canonical = json.dumps(
+        {k: sorted(v) for k, v in sorted(raw.items())},
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
 @dataclass
 class CallGraphIndex:
     """Function- and module-level call graph over a Python repo.
@@ -139,12 +154,17 @@ class CallGraphIndex:
     module_graph: _DiGraph = field(default_factory=_DiGraph)
     raw: dict[str, list[str]] = field(default_factory=dict)
     skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
-    # None = pre-v3 index (no hashes stored); dict = v3/v4 index with per-file SHA256 digests.
+    # None = pre-v3 index (no hashes stored); dict = v3/v5 index with per-file SHA256 digests.
     file_shas: dict[str, str] | None = field(default=None)
     # v4+: maps caller FQN → {pattern: count} for unresolved static-dispatch calls.
     # Empty dict on v4 indexes with zero misses. Present only in v4+; absent from
     # older indexes (which are rejected by load()).
     missed_callers: dict[str, dict[str, int]] = field(default_factory=dict)
+    # v5+: git SHA of the repo at build time (None when build runs outside a git checkout).
+    git_sha: str | None = field(default=None)
+    # v5+: SHA-256 hex digest of the deterministically serialised raw dict.
+    # Computed at from_raw time; persisted in the index header.
+    content_hash: str = field(default="")
     # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
     # Not serialised — rebuilt on every load.
     _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
@@ -160,6 +180,7 @@ class CallGraphIndex:
         skeletons: dict[str, list[SymbolSummary]] | None = None,
         file_shas: dict[str, str] | None = None,
         missed_callers: dict[str, dict[str, int]] | None = None,
+        git_sha: str | None = None,
     ) -> "CallGraphIndex":
         root = Path(root).resolve()
         fg = _DiGraph()
@@ -182,6 +203,9 @@ class CallGraphIndex:
         # Compute in-degree threshold: p99 of in-degree distribution, floor of 10.
         # One-time O(N) cost at index load; cached for O(1) lookup during BFS.
         in_degree_threshold = _compute_in_degree_threshold(fg)
+        # Compute content_hash: SHA-256 of the deterministically serialised raw dict.
+        # Sorted keys + sorted callee lists ensure same raw → same hash.
+        content_hash = _compute_content_hash(raw)
         return cls(
             root=root,
             function_graph=fg,
@@ -190,6 +214,8 @@ class CallGraphIndex:
             skeletons=skeletons,
             file_shas=file_shas,
             missed_callers=missed_callers if missed_callers is not None else {},
+            git_sha=git_sha,
+            content_hash=content_hash,
             _fqn_to_file=fqn_to_file,
             _in_degree_threshold=in_degree_threshold,
         )
@@ -198,12 +224,14 @@ class CallGraphIndex:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {
-            "version": 4,
+            "version": INDEX_VERSION,
             "root": str(self.root),
             "raw": self.raw,
             "skeletons": self.skeletons,
             "file_shas": self.file_shas if self.file_shas is not None else {},
             "missed_callers": self.missed_callers,
+            "git_sha": self.git_sha,
+            "content_hash": self.content_hash,
         }
         path.write_text(json.dumps(payload))
         return path
@@ -213,20 +241,22 @@ class CallGraphIndex:
         path = Path(path)
         payload = json.loads(path.read_text())
         version = payload.get("version")
-        if version != 4:
+        if version != INDEX_VERSION:
             raise ValueError(
-                f"index schema is v{version}, server requires v4 — "
+                f"index schema is v{version}, server requires v{INDEX_VERSION} — "
                 "run 'pyscope-mcp build' to regenerate"
             )
         skeletons: dict[str, list[SymbolSummary]] = payload.get("skeletons", {})
         file_shas: dict[str, str] = payload.get("file_shas", {})
         missed_callers: dict[str, dict[str, int]] = payload.get("missed_callers", {})
+        git_sha: str | None = payload.get("git_sha")
         return cls.from_raw(
             Path(payload["root"]),
             payload["raw"],
             skeletons=skeletons,
             file_shas=file_shas,
             missed_callers=missed_callers,
+            git_sha=git_sha,
         )
 
     _STALE_ACTION = "Run 'pyscope-mcp build' then 'reload' to update the index."

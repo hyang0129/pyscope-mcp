@@ -47,20 +47,30 @@ def test_queries() -> None:
 
 
 def test_save_and_load_roundtrip(tmp_path: Path) -> None:
+    from pyscope_mcp.graph import INDEX_VERSION
     idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
     out = tmp_path / "index.json"
     idx.save(out)
 
+    # Confirm the file carries the current schema version.
+    import json
+    payload = json.loads(out.read_text())
+    assert payload["version"] == INDEX_VERSION
+
     loaded = CallGraphIndex.load(out)
     assert loaded.stats() == idx.stats()
     # Compare only the query results (not staleness — the original idx has file_shas=None
-    # while the saved+loaded v4 index has file_shas={} with no stored hashes and the
+    # while the saved+loaded v5 index has file_shas={} with no stored hashes and the
     # symbol files aren't on disk, so staleness differs by design).
     assert loaded.search("helper")["results"] == idx.search("helper")["results"]
     assert loaded.search("helper")["truncated"] == idx.search("helper")["truncated"]
-    # v4 schema: missed_callers round-trips correctly (default is empty)
+    # v5 schema: missed_callers, git_sha, content_hash round-trip correctly.
     assert loaded.missed_callers == {}
     assert loaded.completeness_for(["sample.a.top"]) == "complete"
+    # git_sha defaults to None when not provided; content_hash is always populated.
+    assert loaded.git_sha is None
+    assert isinstance(loaded.content_hash, str) and len(loaded.content_hash) == 64
+    assert loaded.content_hash == idx.content_hash
 
 
 def _prefix_raw() -> dict[str, list[str]]:

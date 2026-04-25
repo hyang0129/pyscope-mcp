@@ -265,13 +265,14 @@ def test_save_load_roundtrip_with_skeletons(tmp_path: Path) -> None:
     assert result["truncated"] is False
 
 
-def test_save_version_is_4(tmp_path: Path) -> None:
-    """Saved index must have version=4 (bumped from 3 to carry missed_callers)."""
+def test_save_version_is_current(tmp_path: Path) -> None:
+    """Saved index must have the current INDEX_VERSION."""
+    from pyscope_mcp.graph import INDEX_VERSION
     idx = CallGraphIndex.from_raw("/tmp/test", {})
     out = tmp_path / "index.json"
     idx.save(out)
     payload = _json.loads(out.read_text())
-    assert payload["version"] == 4
+    assert payload["version"] == INDEX_VERSION
 
 
 def test_save_includes_file_shas(tmp_path: Path) -> None:
@@ -296,42 +297,42 @@ def test_save_load_roundtrip_file_shas(tmp_path: Path) -> None:
 
 
 def test_load_version_1_raises(tmp_path: Path) -> None:
-    """Version 1 index raises a clear error naming v4 (no backward compat)."""
+    """Version 1 index raises a clear error (no backward compat)."""
     payload = {"version": 1, "root": "/tmp/test", "raw": {}, "skeletons": {"any.py": []}}
     out = tmp_path / "v1_index.json"
     out.write_text(_json.dumps(payload))
 
-    with pytest.raises(ValueError, match="v4"):
+    with pytest.raises(ValueError, match="v1"):
         CallGraphIndex.load(out)
 
 
 def test_load_version_2_raises(tmp_path: Path) -> None:
-    """Version 2 index raises a clear error naming v4 (no backward compat)."""
+    """Version 2 index raises a clear error (no backward compat)."""
     payload = {"version": 2, "root": "/tmp/test", "raw": {}, "skeletons": {}}
     out = tmp_path / "v2_index.json"
     out.write_text(_json.dumps(payload))
 
-    with pytest.raises(ValueError, match="v4"):
+    with pytest.raises(ValueError, match="v2"):
         CallGraphIndex.load(out)
 
 
 def test_load_version_3_raises(tmp_path: Path) -> None:
-    """Version 3 index raises a clear error naming v4 (no backward compat)."""
+    """Version 3 index raises a clear error (no backward compat)."""
     payload = {"version": 3, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
     out = tmp_path / "v3_index.json"
     out.write_text(_json.dumps(payload))
 
-    with pytest.raises(ValueError, match="v4"):
+    with pytest.raises(ValueError, match="v3"):
         CallGraphIndex.load(out)
 
 
 def test_load_version_future_raises(tmp_path: Path) -> None:
-    """Unknown version > 4 raises ValueError."""
-    payload = {"version": 5, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
-    out = tmp_path / "v5_index.json"
+    """Unknown future version raises ValueError."""
+    payload = {"version": 99, "root": "/tmp/test", "raw": {}, "skeletons": {}, "file_shas": {}}
+    out = tmp_path / "v99_index.json"
     out.write_text(_json.dumps(payload))
 
-    with pytest.raises(ValueError, match="v4"):
+    with pytest.raises(ValueError, match="v99"):
         CallGraphIndex.load(out)
 
 
