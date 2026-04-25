@@ -572,3 +572,101 @@ def test_shutdown_then_eof_exits_zero(index_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=2)
+
+
+def test_completeness_field_e2e(tmp_path: Path) -> None:
+    """E2E: build → serve → callers_of returns completeness='partial' when missed_callers present.
+
+    The package has two symbols:
+      - foo: called via getattr(obj, method_name)() in bar — unresolvable, ends up in missed_callers
+      - baz: never called dynamically — completeness='complete'
+
+    Verifies the full pipeline: analyzer miss-log → CLI aggregation → index v4 →
+    server completeness_for() → wire response.
+    """
+    pkg = tmp_path / "mypkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "core.py").write_text(
+        "def foo(): pass\n"
+        "\n"
+        "def bar(obj, method_name):\n"
+        "    foo()  # static edge: bar → foo, so bar appears as a caller of foo\n"
+        "    getattr(obj, method_name)()  # unresolved → bar ends up in missed_callers\n"
+        "\n"
+        "def baz(): return 1\n"
+    )
+
+    index_file = tmp_path / ".pyscope-mcp" / "index.json"
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+
+    build_result = subprocess.run(
+        [sys.executable, "-m", "pyscope_mcp.cli", "build",
+         "--root", str(tmp_path), "--package", "mypkg",
+         "--output", str(index_file)],
+        capture_output=True, env=env,
+    )
+    assert build_result.returncode == 0, f"build failed: {build_result.stderr.decode()}"
+
+    payload = json.loads(index_file.read_text())
+    assert payload["version"] == 4, f"expected v4 index; got version={payload.get('version')}"
+    assert "missed_callers" in payload, "index must contain missed_callers"
+    # bar has an unresolvable getattr call — it must appear in missed_callers
+    assert "mypkg.core.bar" in payload["missed_callers"], (
+        f"expected mypkg.core.bar in missed_callers; got keys: {list(payload['missed_callers'])}"
+    )
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "pyscope_mcp.cli", "serve",
+         "--root", str(tmp_path), "--index", str(index_file)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "e2e-completeness", "version": "0"}},
+        })
+        r = _recv(proc)
+        assert r["id"] == 1
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # foo's callers include bar, which has missed dynamic calls → partial
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.foo"}},
+        })
+        r2 = _recv(proc)
+        assert r2["id"] == 2
+        assert "error" not in r2, f"unexpected JSON-RPC error: {r2}"
+        body2 = json.loads(r2["result"]["content"][0]["text"])
+        assert body2["completeness"] == "partial", (
+            f"expected partial (bar has a getattr miss); got completeness={body2.get('completeness')!r}\n"
+            f"full body: {body2}"
+        )
+
+        # baz has no callers and no missed_callers entry → complete
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.baz"}},
+        })
+        r3 = _recv(proc)
+        assert r3["id"] == 3
+        assert "error" not in r3, f"unexpected JSON-RPC error: {r3}"
+        body3 = json.loads(r3["result"]["content"][0]["text"])
+        assert body3["completeness"] == "complete", (
+            f"expected complete for baz; got completeness={body3.get('completeness')!r}\n"
+            f"full body: {body3}"
+        )
+
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r = _recv(proc)
+        assert r == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
