@@ -10,6 +10,7 @@ from typing import TypedDict
 from pyscope_mcp.types import (
     CalleesResult,
     CallersResult,
+    Completeness,
     ModuleResult,
     NeighborhoodResult,
     SearchResult,
@@ -138,8 +139,12 @@ class CallGraphIndex:
     module_graph: _DiGraph = field(default_factory=_DiGraph)
     raw: dict[str, list[str]] = field(default_factory=dict)
     skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
-    # None = pre-v3 index (no hashes stored); dict = v3 index with per-file SHA256 digests.
+    # None = pre-v3 index (no hashes stored); dict = v3/v4 index with per-file SHA256 digests.
     file_shas: dict[str, str] | None = field(default=None)
+    # v4+: maps caller FQN → {pattern: count} for unresolved static-dispatch calls.
+    # Empty dict on v4 indexes with zero misses. Present only in v4+; absent from
+    # older indexes (which are rejected by load()).
+    missed_callers: dict[str, dict[str, int]] = field(default_factory=dict)
     # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
     # Not serialised — rebuilt on every load.
     _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
@@ -151,6 +156,7 @@ class CallGraphIndex:
         raw: dict[str, list[str]],
         skeletons: dict[str, list[SymbolSummary]] | None = None,
         file_shas: dict[str, str] | None = None,
+        missed_callers: dict[str, dict[str, int]] | None = None,
     ) -> "CallGraphIndex":
         root = Path(root).resolve()
         fg = _DiGraph()
@@ -177,6 +183,7 @@ class CallGraphIndex:
             raw=raw,
             skeletons=skeletons,
             file_shas=file_shas,
+            missed_callers=missed_callers if missed_callers is not None else {},
             _fqn_to_file=fqn_to_file,
         )
 
@@ -184,11 +191,12 @@ class CallGraphIndex:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload: dict = {
-            "version": 3,
+            "version": 4,
             "root": str(self.root),
             "raw": self.raw,
             "skeletons": self.skeletons,
             "file_shas": self.file_shas if self.file_shas is not None else {},
+            "missed_callers": self.missed_callers,
         }
         path.write_text(json.dumps(payload))
         return path
@@ -198,20 +206,81 @@ class CallGraphIndex:
         path = Path(path)
         payload = json.loads(path.read_text())
         version = payload.get("version")
-        if version not in (1, 2, 3):
-            raise ValueError(f"unsupported index version: {version}")
+        if version != 4:
+            raise ValueError(
+                f"index schema is v{version}, server requires v4 — "
+                "run 'pyscope-mcp build' to regenerate"
+            )
         skeletons: dict[str, list[SymbolSummary]] = payload.get("skeletons", {})
-        # v1/v2: no file_shas stored — use None as sentinel to signal pre-v3.
-        # v3: read the stored file_shas dict.
-        file_shas: dict[str, str] | None = None if version < 3 else payload.get("file_shas", {})
+        file_shas: dict[str, str] = payload.get("file_shas", {})
+        missed_callers: dict[str, dict[str, int]] = payload.get("missed_callers", {})
         return cls.from_raw(
             Path(payload["root"]),
             payload["raw"],
             skeletons=skeletons,
             file_shas=file_shas,
+            missed_callers=missed_callers,
         )
 
     _STALE_ACTION = "Run 'pyscope-mcp build' then 'reload' to update the index."
+
+    @staticmethod
+    def _class_prefix(fqn: str) -> str | None:
+        """Return the class-level FQN prefix for a method FQN, or None.
+
+        A method FQN has ≥4 dotted segments (e.g. ``pkg.mod.MyClass.method``
+        → ``pkg.mod.MyClass``).  Top-level functions have ≤3 segments
+        (e.g. ``pkg.mod.func`` or ``pkg.func``) and return ``None`` —
+        they never trip the class-prefix path.
+
+        The "≥4 segments" rule derives from the minimum realistic Python FQN
+        for a method: ``<package>.<module>.<Class>.<method>``.  Three-segment
+        FQNs (e.g. ``pkg.mod.func``) are always top-level functions.
+
+        Examples:
+          ``pkg.mod.MyClass.method`` → ``pkg.mod.MyClass``  (4 segments)
+          ``a.b.c.D.method``         → ``a.b.c.D``          (5 segments)
+          ``pkg.mod.func``           → ``None``              (3 segments)
+          ``pkg.func``               → ``None``              (2 segments)
+        """
+        parts = fqn.split(".")
+        if len(parts) >= 4:
+            return ".".join(parts[:-1])
+        return None
+
+    def completeness_for(self, fqns: list[str]) -> Completeness:
+        """Return the completeness status for a set of traversed FQNs.
+
+        Returns ``"partial"`` if any FQN in *fqns* is:
+          - directly present as a key in ``self.missed_callers`` (direct hit), OR
+          - a method of a class (≥3 dotted segments) whose class prefix (all but
+            the last segment) is a prefix of any key in ``self.missed_callers``.
+            E.g. ``a.b.C.bar`` is partial if ``a.b.C.foo`` is in missed_callers,
+            because both share the class prefix ``a.b.C``.
+
+        Top-level functions (≤2 dotted segments) NEVER trip the class-prefix path;
+        they only return ``"partial"`` on a direct hit.
+
+        Returns ``"complete"`` when ``missed_callers`` is empty or no FQN in
+        *fqns* matches either condition.
+        """
+        if not self.missed_callers:
+            return "complete"
+        missed_keys = set(self.missed_callers.keys())
+        for fqn in fqns:
+            # Direct hit
+            if fqn in missed_keys:
+                return "partial"
+            # Class-prefix hit (methods only)
+            prefix = self._class_prefix(fqn)
+            if prefix is not None:
+                # Any missed_callers key that starts with "<prefix>." means a
+                # sibling method in the same class has unresolved calls.
+                prefix_dot = prefix + "."
+                for key in missed_keys:
+                    if key.startswith(prefix_dot):
+                        return "partial"
+        return "complete"
 
     def _staleness_for(self, fqns: list[str]) -> dict:
         """Compute result-scoped staleness for a list of FQNs.
@@ -335,7 +404,8 @@ class CallGraphIndex:
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
         Response includes uniform staleness fields (``stale``, ``stale_files``,
-        and optionally ``stale_action`` / ``index_stale_reason``).
+        and optionally ``stale_action`` / ``index_stale_reason``) and a
+        ``completeness`` field (``"complete"`` or ``"partial"``).
         """
         all_results = _bfs(self.function_graph.reverse(copy=False), fqn, depth)
         truncated = len(all_results) > self._CALLERS_CALLEES_CAP
@@ -344,6 +414,7 @@ class CallGraphIndex:
         return CallersResult(
             results=results,
             truncated=truncated,
+            completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
         )
 
@@ -352,7 +423,8 @@ class CallGraphIndex:
 
         Results are capped at 50; ``truncated`` signals when the cap fires.
         Response includes uniform staleness fields (``stale``, ``stale_files``,
-        and optionally ``stale_action`` / ``index_stale_reason``).
+        and optionally ``stale_action`` / ``index_stale_reason``) and a
+        ``completeness`` field (``"complete"`` or ``"partial"``).
         """
         all_results = _bfs(self.function_graph, fqn, depth)
         truncated = len(all_results) > self._CALLERS_CALLEES_CAP
@@ -361,6 +433,7 @@ class CallGraphIndex:
         return CalleesResult(
             results=results,
             truncated=truncated,
+            completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
         )
 
@@ -438,6 +511,7 @@ class CallGraphIndex:
                 edges=[],
                 truncated=False,
                 token_budget_used=0,
+                completeness=self.completeness_for([symbol]),
             )
             result.update(staleness)  # type: ignore[arg-type]
             return result
@@ -510,6 +584,7 @@ class CallGraphIndex:
             edges=[[c, e] for c, e in kept_edges],
             truncated=truncated,
             token_budget_used=chars_used // 4,
+            completeness=self.completeness_for(unique_fqns),
         )
         result.update(staleness)  # type: ignore[arg-type]
         if truncated and depth_truncated is not None:
@@ -528,16 +603,19 @@ class CallGraphIndex:
 
         Staleness is result-scoped: module FQNs are expanded to file paths via
         prefix-matching against ``_fqn_to_file`` (find all symbol FQNs that start
-        with ``result_module + "."``).
+        with ``result_module + "."``).  Completeness is computed over the same
+        expanded symbol FQN set.
         """
         base = _prefix_module_bfs(
             self.module_graph.reverse(copy=False), self.module_graph, module, depth
         )
         result_modules: list[str] = base["results"]  # type: ignore[assignment]
         staleness = self._staleness_for_modules(result_modules)
+        symbol_fqns = self._expand_modules_to_symbols(result_modules)
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
+            completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
         )
 
@@ -545,15 +623,33 @@ class CallGraphIndex:
         """Return callees of all modules whose FQN starts with *module* (prefix query).
 
         Symmetric to :meth:`module_callers` — see its docstring for semantics.
+        Completeness is computed over the expanded symbol FQNs of the result modules.
         """
         base = _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
         result_modules: list[str] = base["results"]  # type: ignore[assignment]
         staleness = self._staleness_for_modules(result_modules)
+        symbol_fqns = self._expand_modules_to_symbols(result_modules)
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
+            completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
         )
+
+    def _expand_modules_to_symbols(self, module_fqns: list[str]) -> list[str]:
+        """Expand module FQNs to the symbol FQNs they contain.
+
+        Module FQNs (e.g. ``pkg.mod``) are not directly stored in ``_fqn_to_file``;
+        only function/class/method FQNs are.  Expansion finds all ``_fqn_to_file``
+        keys that start with ``module_fqn + "."``.
+        """
+        symbol_fqns: list[str] = []
+        for mod in module_fqns:
+            prefix = mod + "."
+            for fqn in self._fqn_to_file:
+                if fqn.startswith(prefix):
+                    symbol_fqns.append(fqn)
+        return symbol_fqns
 
     def _staleness_for_modules(self, module_fqns: list[str]) -> dict:
         """Expand module FQNs to symbol FQNs and delegate to ``_staleness_for``.
@@ -569,13 +665,7 @@ class CallGraphIndex:
                 "index_stale_reason": "index_format_incompatible",
                 "stale_action": self._STALE_ACTION,
             }
-        symbol_fqns: list[str] = []
-        for mod in module_fqns:
-            prefix = mod + "."
-            for fqn in self._fqn_to_file:
-                if fqn.startswith(prefix):
-                    symbol_fqns.append(fqn)
-        return self._staleness_for(symbol_fqns)
+        return self._staleness_for(self._expand_modules_to_symbols(module_fqns))
 
     def search(self, substring: str, limit: int = 50) -> SearchResult:
         """Substring search over known fully-qualified function names.

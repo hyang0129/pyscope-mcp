@@ -54,10 +54,13 @@ def test_save_and_load_roundtrip(tmp_path: Path) -> None:
     loaded = CallGraphIndex.load(out)
     assert loaded.stats() == idx.stats()
     # Compare only the query results (not staleness — the original idx has file_shas=None
-    # which produces a pre-v3 stale signal, while the saved+loaded index is v3 with no
-    # stored hashes and the symbol files aren't on disk, so staleness differs by design).
+    # while the saved+loaded v4 index has file_shas={} with no stored hashes and the
+    # symbol files aren't on disk, so staleness differs by design).
     assert loaded.search("helper")["results"] == idx.search("helper")["results"]
     assert loaded.search("helper")["truncated"] == idx.search("helper")["truncated"]
+    # v4 schema: missed_callers round-trips correctly (default is empty)
+    assert loaded.missed_callers == {}
+    assert loaded.completeness_for(["sample.a.top"]) == "complete"
 
 
 def _prefix_raw() -> dict[str, list[str]]:
