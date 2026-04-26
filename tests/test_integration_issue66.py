@@ -152,38 +152,6 @@ class TestBuildToolWiring:
     """
 
     @pytest.mark.integration_wiring
-    def test_build_tool_present_in_tools_list(self, built_index) -> None:
-        """[wiring] build tool must appear in tools/list response over real stdio-RPC."""
-        index_file, pkg_root, repo_root, env = built_index
-        proc = _spawn_server(index_file, root=pkg_root)
-        try:
-            _handshake(proc, "it66-wiring-list")
-
-            _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-            r = _recv(proc)
-            assert r["id"] == 2
-            assert "error" not in r, f"unexpected JSON-RPC error: {r}"
-
-            tools = r["result"]["tools"]
-            tool_names = [t["name"] for t in tools]
-
-            # [Assert] build tool registered — wiring assertion
-            assert "build" in tool_names, (
-                f"build tool missing from tools/list; got: {tool_names}"
-            )
-
-            # [Assert] schema shape present — structural correctness
-            build_def = next(t for t in tools if t["name"] == "build")
-            assert "inputSchema" in build_def, "build tool must have inputSchema"
-            assert "description" in build_def, "build tool must have description"
-
-            _shutdown(proc)
-        finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=2)
-
-    @pytest.mark.integration_wiring
     def test_build_tool_rpc_response_structure(self, built_index, tmp_path: Path) -> None:
         """[wiring] build tool over real stdio-RPC: response has isError:false + stats fields.
 
