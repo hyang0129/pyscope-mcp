@@ -178,8 +178,8 @@ async def test_golden_handshake(server: RpcServer, tmp_index: Path):
     assert list_resp["id"] == 2
     tools = list_resp["result"]["tools"]
     tool_names = {t["name"] for t in tools}
-    assert tool_names == {"stats", "reload", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton", "neighborhood"}
-    assert len(tools) == 9
+    assert tool_names == {"stats", "reload", "build", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton", "neighborhood"}
+    assert len(tools) == 10
 
 
 @pytest.mark.asyncio
@@ -197,6 +197,10 @@ async def test_tool_annotations(server: RpcServer):
     reload_ann = tools["reload"]["annotations"]
     assert reload_ann["readOnlyHint"] is False
     assert reload_ann["idempotentHint"] is True
+
+    build_ann = tools["build"]["annotations"]
+    assert build_ann["readOnlyHint"] is False
+    assert build_ann["idempotentHint"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -858,7 +862,7 @@ async def test_tools_list_ignores_cursor_and_omits_next_cursor(server: RpcServer
     result = responses[0]["result"]
     assert "tools" in result
     assert "nextCursor" not in result
-    assert len(result["tools"]) == 9
+    assert len(result["tools"]) == 10
 
 
 @pytest.mark.asyncio

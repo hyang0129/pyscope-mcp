@@ -14,6 +14,7 @@ Instead of grepping blindly:
 - `search(query)` — substring search over all FQNs
 - `stats()` — sanity-check the loaded index
 - `reload()` — re-read the index from disk after running `pyscope-mcp build`
+- `build()` — trigger a rebuild via subprocess and reload the in-process index in one call
 
 The graph is **precomputed and saved** — `pyscope-mcp build` runs the analyzer once and writes a JSON index; `pyscope-mcp serve` loads that index and answers MCP queries without re-running analysis.
 

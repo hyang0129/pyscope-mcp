@@ -19,9 +19,9 @@ When the conventions below appear to conflict with the constitution, the constit
 
 ## Current status
 
-Scaffold only. The query layer, index format, CLI, MCP server, and tests are all in place. The analyzer — the thing that turns source code into the raw `{caller_fqn: [callee_fqn, ...]}` dict — is **not implemented**. `pyscope_mcp/analyzer.py::build_raw` raises `NotImplementedError`.
+The query layer, index format, CLI, MCP server, tests, and **analyzer** are all fully implemented and in production. The AST-based analyzer (`build_raw` and `build_with_report`) walks the target repo, resolves intra-package call edges, captures file-level SHA digests and skeleton symbols, and writes a versioned JSON index. Running `pyscope-mcp build` produces the index; `pyscope-mcp serve` loads it and answers MCP queries.
 
-We started on pycg but dropped it. See [docs/prior-art.md](docs/prior-art.md) for the full pivot rationale, the inherent limits of static analysis on dynamic Python, and a survey of how other code-graph MCPs solve these problems. The conventions below are the distilled takeaways — read prior-art.md for the reasoning.
+See [docs/prior-art.md](docs/prior-art.md) for the full pivot rationale (why we dropped pycg), the inherent limits of static analysis on dynamic Python, and a survey of how other code-graph MCPs solve these problems. The conventions below are the distilled takeaways — read prior-art.md for the reasoning.
 
 ## The one contract the analyzer must satisfy
 
@@ -64,7 +64,7 @@ When adding a new MCP tool that needs graph data, assume the index is already lo
 ## Layout
 
 - `src/pyscope_mcp/graph.py` — `CallGraphIndex`: wraps raw dict in `_DiGraph` (inline plain-dict adjacency list), implements queries, save/load.
-- `src/pyscope_mcp/analyzer.py` — **stub**. Implement `build_raw` here.
+- `src/pyscope_mcp/analyzer/` — AST-based implementation of `build_raw` and `build_with_report`. Walks source files, resolves intra-package calls, emits file-level SHA digests and skeleton symbols.
 - `src/pyscope_mcp/cli.py` — argparse entry point with `build` and `serve` subcommands.
 - `src/pyscope_mcp/server.py` — MCP stdio server.
 - `tests/` — pytest; fixtures are synthetic raw dicts, not real repos.
@@ -72,14 +72,12 @@ When adding a new MCP tool that needs graph data, assume the index is already lo
 
 ## MCP tool surface
 
-Currently shipping: `stats`, `reload`, `callers_of`, `callees_of`, `module_callers`, `module_callees`, `search`.
+Currently shipping: `stats`, `reload`, `build`, `callers_of`, `callees_of`, `module_callers`, `module_callees`, `search`, `file_skeleton`, `neighborhood`.
 
-Missing but recurring across every other code-graph MCP — add in this order when the analyzer lands:
+Missing but recurring across every other code-graph MCP — add in this order:
 
-1. **`file_skeleton(path)`** — symbols + signatures, no bodies. Reportedly the single highest-leverage tool for agent context.
-2. **`call_chain(src, dst)`** — BFS shortest path from caller to callee.
-3. **`neighborhood(symbol, depth, token_budget)`** — bounded subgraph around a symbol, **rank-and-truncate** to the token budget (aider repo-map pattern: score candidates and drop low-rank entries until it fits). Do not dump raw subgraphs; they're useless to agents.
-4. **`impact(symbol)`** — callers + transitive callers, split direct / indirect / transitive.
+1. **`call_chain(src, dst)`** — BFS shortest path from caller to callee.
+2. **`impact(symbol)`** — callers + transitive callers, split direct / indirect / transitive.
 
 Conventions when adding tools:
 - No raw-query endpoints (CPGQL-style). Agents write bad queries.
