@@ -144,7 +144,7 @@ class CallGraphIndex:
     The source of truth is `raw`: a mapping {caller_fqn: [callee_fqn, ...]}.
     Graphs are derived from `raw` on construction and on `load`. The backend
     that populates `raw` from source code lives in pyscope_mcp.analyzer
-    (not yet implemented — see CLAUDE.md for the rewrite plan).
+    (AST-based; fully implemented — see CLAUDE.md for the contract).
 
     ``skeletons`` maps relative file paths → pre-computed lists of SymbolSummary
     dicts, populated during ``pyscope-mcp build`` (index version 2+).
