@@ -30,6 +30,9 @@ class SearchResult(TypedDict):
     stale_files: list[str]
     stale_action: NotRequired[str]
     index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
 
 
 class StatsResult(TypedDict):
@@ -39,6 +42,9 @@ class StatsResult(TypedDict):
     function_edges: int
     modules: int
     module_edges: int
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
 
 
 class CallersResult(TypedDict):
@@ -52,6 +58,9 @@ class CallersResult(TypedDict):
     stale_files: list[str]
     stale_action: NotRequired[str]
     index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
 
 
 class CalleesResult(TypedDict):
@@ -65,6 +74,9 @@ class CalleesResult(TypedDict):
     stale_files: list[str]
     stale_action: NotRequired[str]
     index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
 
 
 class ModuleResult(TypedDict):
@@ -79,6 +91,9 @@ class ModuleResult(TypedDict):
     stale_files: list[str]
     stale_action: NotRequired[str]
     index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
 
 
 class NeighborhoodResult(TypedDict, total=False):
@@ -121,3 +136,6 @@ class NeighborhoodResult(TypedDict, total=False):
     stale_files: list[str]
     stale_action: NotRequired[str]
     index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]

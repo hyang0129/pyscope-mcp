@@ -47,3 +47,7 @@ target-version = "py310"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration_wiring: wiring-tier integration tests (fast, real subprocess, stdio JSON-RPC)",
+    "integration_artifact: artifact-tier integration tests (exact output, nightly or on label)",
+]

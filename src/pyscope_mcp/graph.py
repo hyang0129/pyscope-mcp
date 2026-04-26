@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,7 +144,7 @@ class CallGraphIndex:
     The source of truth is `raw`: a mapping {caller_fqn: [callee_fqn, ...]}.
     Graphs are derived from `raw` on construction and on `load`. The backend
     that populates `raw` from source code lives in pyscope_mcp.analyzer
-    (not yet implemented — see CLAUDE.md for the rewrite plan).
+    (AST-based; fully implemented — see CLAUDE.md for the contract).
 
     ``skeletons`` maps relative file paths → pre-computed lists of SymbolSummary
     dicts, populated during ``pyscope-mcp build`` (index version 2+).
@@ -259,7 +260,7 @@ class CallGraphIndex:
             git_sha=git_sha,
         )
 
-    _STALE_ACTION = "Run 'pyscope-mcp build' then 'reload' to update the index."
+    _STALE_ACTION = "Call the 'build' MCP tool to rebuild and reload the index."
 
     @staticmethod
     def _class_prefix(fqn: str) -> str | None:
@@ -366,6 +367,50 @@ class CallGraphIndex:
             }
         return {"stale": False, "stale_files": []}
 
+    def _commit_staleness(self) -> dict:
+        """Return commit-level staleness fields for the loaded index.
+
+        Compares ``self.git_sha`` (captured at build time) against the current
+        HEAD of the repo at ``self.root`` via ``git rev-parse HEAD``.
+
+        Returns a dict with three fields — always present, never omitted:
+          - ``commit_stale: bool | None`` — True when HEAD has advanced past the
+            index's build commit; None when the comparison is impossible.
+          - ``index_git_sha: str | None`` — git SHA captured at build time
+            (None when the index was built outside a git checkout).
+          - ``head_git_sha: str | None`` — current HEAD SHA of the repo
+            (None when git is unavailable or HEAD cannot be resolved).
+
+        When the index was built outside a git checkout (``self.git_sha`` is
+        None) or git is unavailable, all three fields are None.
+        """
+        index_sha = self.git_sha
+        head_sha: str | None = None
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                head_sha = result.stdout.strip() or None
+        except FileNotFoundError:
+            pass  # git binary not installed
+
+        if index_sha is None or head_sha is None:
+            return {
+                "commit_stale": None,
+                "index_git_sha": None,
+                "head_git_sha": None,
+            }
+        return {
+            "commit_stale": head_sha != index_sha,
+            "index_git_sha": index_sha,
+            "head_git_sha": head_sha,
+        }
+
     def file_skeleton(self, path: str, cap: int = _SKELETON_CAP) -> dict:
         """Return a compact symbol list for the given relative file path.
 
@@ -381,6 +426,8 @@ class CallGraphIndex:
         Results are always returned when the path is in the index, even when stale.
         If the path is not in the index, returns an error dict with ``isError: True``.
         """
+        commit = self._commit_staleness()
+
         # Scenario D / isError: path not in skeletons
         if path not in self.skeletons:
             result: dict = {
@@ -388,6 +435,7 @@ class CallGraphIndex:
                 "stale": True,
                 "stale_files": [],
                 "stale_action": self._STALE_ACTION,
+                **commit,
             }
             if self.file_shas is None:
                 result["index_stale_reason"] = "index_format_incompatible"
@@ -408,6 +456,7 @@ class CallGraphIndex:
             base_result["stale_files"] = []
             base_result["index_stale_reason"] = "index_format_incompatible"
             base_result["stale_action"] = self._STALE_ACTION
+            base_result.update(commit)
             return base_result
 
         # Scenarios A/B/C: v3 index — compare live file hash against stored hash.
@@ -417,6 +466,7 @@ class CallGraphIndex:
             base_result["stale"] = True
             base_result["stale_files"] = [path]
             base_result["stale_action"] = self._STALE_ACTION
+            base_result.update(commit)
             return base_result
 
         stored_sha = self.file_shas.get(path)
@@ -427,11 +477,13 @@ class CallGraphIndex:
             base_result["stale"] = True
             base_result["stale_files"] = [path]
             base_result["stale_action"] = self._STALE_ACTION
+            base_result.update(commit)
             return base_result
 
         # Scenario A: fresh — hashes match.
         base_result["stale"] = False
         base_result["stale_files"] = []
+        base_result.update(commit)
         return base_result
 
     _CALLERS_CALLEES_CAP = 50
@@ -484,12 +536,14 @@ class CallGraphIndex:
         truncated = dropped > 0
         results = ranked[: self._CALLERS_CALLEES_CAP]
         staleness = self._staleness_for(results)
+        commit = self._commit_staleness()
         return CallersResult(
             results=results,
             truncated=truncated,
             dropped=dropped,
             completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
+            **commit,  # type: ignore[arg-type]
         )
 
     def callees_of(self, fqn: str, depth: int = 1) -> CalleesResult:
@@ -511,12 +565,14 @@ class CallGraphIndex:
         truncated = dropped > 0
         results = ranked[: self._CALLERS_CALLEES_CAP]
         staleness = self._staleness_for(results)
+        commit = self._commit_staleness()
         return CalleesResult(
             results=results,
             truncated=truncated,
             dropped=dropped,
             completeness=self.completeness_for(results),
             **staleness,  # type: ignore[arg-type]
+            **commit,  # type: ignore[arg-type]
         )
 
     def neighborhood(
@@ -627,6 +683,7 @@ class CallGraphIndex:
         if not edge_depths:
             # Symbol not in graph or isolated node — return minimal result
             staleness = self._staleness_for([symbol])
+            commit = self._commit_staleness()
             result = NeighborhoodResult(
                 symbol=symbol,
                 depth_full=0,
@@ -638,6 +695,7 @@ class CallGraphIndex:
                 hub_threshold=effective_threshold,
             )
             result.update(staleness)  # type: ignore[arg-type]
+            result.update(commit)  # type: ignore[arg-type]
             return result
 
         # ------------------------------------------------------------------
@@ -701,6 +759,7 @@ class CallGraphIndex:
             {fqn for edge in kept_edges for fqn in edge}
         )
         staleness = self._staleness_for(unique_fqns)
+        commit = self._commit_staleness()
 
         result = NeighborhoodResult(
             symbol=symbol,
@@ -713,6 +772,7 @@ class CallGraphIndex:
             hub_threshold=effective_threshold,
         )
         result.update(staleness)  # type: ignore[arg-type]
+        result.update(commit)  # type: ignore[arg-type]
         if truncated and depth_truncated is not None:
             result["depth_truncated"] = depth_truncated
 
@@ -770,12 +830,14 @@ class CallGraphIndex:
         result_modules = ranked[:cap]
         staleness = self._staleness_for_modules(result_modules)
         symbol_fqns = self._expand_modules_to_symbols(result_modules)
+        commit = self._commit_staleness()
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
             dropped=dropped,
             completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
+            **commit,  # type: ignore[arg-type]
         )
 
     def module_callees(self, module: str, depth: int = 1) -> ModuleResult:
@@ -796,12 +858,14 @@ class CallGraphIndex:
         result_modules = ranked[:cap]
         staleness = self._staleness_for_modules(result_modules)
         symbol_fqns = self._expand_modules_to_symbols(result_modules)
+        commit = self._commit_staleness()
         return ModuleResult(
             results=result_modules,
             truncated=base["truncated"],  # type: ignore[typeddict-item]
             dropped=dropped,
             completeness=self.completeness_for(symbol_fqns),
             **staleness,  # type: ignore[arg-type]
+            **commit,  # type: ignore[arg-type]
         )
 
     def _expand_modules_to_symbols(self, module_fqns: list[str]) -> list[str]:
@@ -849,19 +913,23 @@ class CallGraphIndex:
         total = len(all_matches)
         results = all_matches[:limit]
         staleness = self._staleness_for(results)
+        commit = self._commit_staleness()
         return SearchResult(
             results=results,
             truncated=total > limit,
             total_matched=total,
             **staleness,  # type: ignore[arg-type]
+            **commit,  # type: ignore[arg-type]
         )
 
     def stats(self) -> StatsResult:
+        commit = self._commit_staleness()
         return StatsResult(
             functions=self.function_graph.number_of_nodes(),
             function_edges=self.function_graph.number_of_edges(),
             modules=self.module_graph.number_of_nodes(),
             module_edges=self.module_graph.number_of_edges(),
+            **commit,  # type: ignore[arg-type]
         )
 
 
