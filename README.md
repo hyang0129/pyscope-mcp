@@ -2,18 +2,18 @@
 
 A deployable MCP server that exposes Python function- and module-level call graphs over any Python repo, for use by agentic coding clients (Claude Code, etc.).
 
-**Status: scaffold.** The index format, the MCP server, the CLI, and the query layer are in place and tested. The call-graph **analyzer is not yet implemented** — see [docs/prior-art.md](docs/prior-art.md) for why we dropped pycg and the design notes for the replacement. Running `pyscope-mcp build` currently raises `NotImplementedError`.
-
-## What it will give an agent
+## What it gives an agent
 
 Instead of grepping blindly:
 
 - `callers_of(fqn, depth)` — who calls this function, transitively
 - `callees_of(fqn, depth)` — what does this function reach
 - `module_callers(module)` / `module_callees(module)` — module-level dependency edges
+- `neighborhood(symbol, depth, token_budget)` — bounded bidirectional subgraph around a symbol, rank-truncated to fit a token budget
+- `file_skeleton(path)` — all top-level functions, classes, and methods defined in a file
 - `search(query)` — substring search over all FQNs
 - `stats()` — sanity-check the loaded index
-- `reload()` — re-read the index after a `pyscope-mcp build`
+- `reload()` — re-read the index from disk after running `pyscope-mcp build`
 
 The graph is **precomputed and saved** — `pyscope-mcp build` runs the analyzer once and writes a JSON index; `pyscope-mcp serve` loads that index and answers MCP queries without re-running analysis.
 
