@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -74,8 +75,25 @@ def cmd_build(args: argparse.Namespace) -> int:
             missed_callers[caller] = {}
         missed_callers[caller][pattern] = missed_callers[caller].get(pattern, 0) + 1
 
+    # Capture git SHA at build time (Law 3: git-in-sync graph).
+    # Failure to capture (not a git checkout, git absent) → git_sha=None, not an error.
+    git_sha: str | None = None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            git_sha = result.stdout.strip() or None
+    except FileNotFoundError:
+        pass  # git binary not installed
+
     idx = CallGraphIndex.from_raw(
-        root, raw, skeletons=skeletons, file_shas=file_shas, missed_callers=missed_callers
+        root, raw, skeletons=skeletons, file_shas=file_shas, missed_callers=missed_callers,
+        git_sha=git_sha,
     )
     idx.save(out)
 
