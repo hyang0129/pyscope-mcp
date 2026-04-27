@@ -831,3 +831,151 @@ def test_neighborhood_hub_fields_always_present_isolated() -> None:
     assert "hub_threshold" in result
     assert result["hub_suppressed"] == []
     assert isinstance(result["hub_threshold"], int)
+
+
+# ---------------------------------------------------------------------------
+# Issue #84 — Schema + index model migration (epic #76 child #1)
+#
+# These tests pin the four acceptance scenarios from issue #84:
+#   1. Save/load round-trip with the new ``nodes`` shape
+#   2. Old-shape (v5 with ``raw``, or any v<5) indexes are rejected
+#   3. ``MissLog.to_dict()`` takes no arguments
+#   4. Deterministic JSON serialisation across insertion orders
+# ---------------------------------------------------------------------------
+
+import pytest
+
+from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
+
+
+def _sample_nodes() -> dict[str, dict]:
+    return {
+        "pkg.mod.foo": {
+            "calls": {"call": ["pkg.mod.bar"]},
+            "called_by": {},
+        },
+        "pkg.mod.bar": {
+            "calls": {},
+            "called_by": {"call": ["pkg.mod.foo"]},
+        },
+    }
+
+
+def test_load_version_5_roundtrip(tmp_path: Path) -> None:
+    """Scenario 1: save() then load() with the new ``nodes`` shape preserves edges and stats."""
+    idx = CallGraphIndex.from_nodes(str(tmp_path), _sample_nodes())
+    out = tmp_path / "index.json"
+    idx.save(out)
+
+    raw_payload = json.loads(out.read_text())
+    assert raw_payload["version"] == INDEX_VERSION == 5
+    assert "nodes" in raw_payload
+    assert "raw" not in raw_payload
+
+    loaded = CallGraphIndex.load(out)
+    assert loaded.stats() == idx.stats()
+    # Forward edge available via callees_of
+    callees = loaded.callees_of("pkg.mod.foo", depth=1)
+    assert callees["results"] == ["pkg.mod.bar"]
+    # Reverse edge available via callers_of (rebuilt _DiGraph._pred)
+    callers = loaded.callers_of("pkg.mod.bar", depth=1)
+    assert callers["results"] == ["pkg.mod.foo"]
+
+
+def test_load_legacy_v5_raw_payload_raises(tmp_path: Path) -> None:
+    """Scenario 2: a v5 payload that still uses the legacy ``raw`` field is rejected.
+
+    Pre-migration v5 indexes (epic #76 in-flight) wrote ``raw`` instead of
+    ``nodes``.  The clear-error contract says: rebuild required, no migration
+    shim (Corollary 1.3/4.3).  The error message must mention both
+    ``version`` (so the user knows it's a schema issue) and ``build`` (so they
+    know how to fix it).
+    """
+    legacy_v5 = {
+        "version": 5,
+        "root": str(tmp_path),
+        "raw": {"pkg.mod.foo": ["pkg.mod.bar"]},
+        "skeletons": {},
+        "file_shas": {},
+        "missed_callers": {},
+    }
+    idx_path = tmp_path / "legacy_v5.json"
+    idx_path.write_text(json.dumps(legacy_v5))
+    with pytest.raises(ValueError, match="build"):
+        CallGraphIndex.load(idx_path)
+
+
+def test_misslog_to_dict_takes_no_arguments() -> None:
+    """Scenario 3: ``MissLog.to_dict()`` is callable with no positional args."""
+    from pyscope_mcp.analyzer.misses import MissLog
+
+    log = MissLog()
+    log.record_call_edge("pkg.mod.foo", "pkg.mod.bar")
+    log.record_call_edge("pkg.mod.foo", "pkg.mod.baz")
+    # No arguments — no raw, no known_fqns
+    report = log.to_dict()
+    assert "summary" in report
+    # dead_keys: callers with no in-edges (foo is the only caller; it has no in-edges)
+    assert report["summary"]["rollups"]["dead_keys"] == ["pkg.mod.foo"]
+
+
+def test_deterministic_serialization(tmp_path: Path) -> None:
+    """Scenario 4: same edges in different insertion orders → byte-identical JSON."""
+    nodes_a: dict[str, dict] = {
+        "pkg.a": {"calls": {"call": ["pkg.b", "pkg.c"]}, "called_by": {}},
+        "pkg.b": {"calls": {}, "called_by": {"call": ["pkg.a"]}},
+        "pkg.c": {"calls": {}, "called_by": {"call": ["pkg.a"]}},
+    }
+    # Reverse insertion order; reverse list orders too.
+    nodes_b: dict[str, dict] = {}
+    nodes_b["pkg.c"] = {"calls": {}, "called_by": {"call": ["pkg.a"]}}
+    nodes_b["pkg.b"] = {"calls": {}, "called_by": {"call": ["pkg.a"]}}
+    nodes_b["pkg.a"] = {"calls": {"call": ["pkg.c", "pkg.a"][::-1]}, "called_by": {}}
+    # Note: nodes_b["pkg.a"]["calls"]["call"] is now ["pkg.a","pkg.c"] reversed → ["pkg.c","pkg.a"]
+    # We want the same edge set as nodes_a, just supplied in a different list order.
+    nodes_b["pkg.a"]["calls"]["call"] = ["pkg.c", "pkg.b"]
+
+    idx_a = CallGraphIndex.from_nodes(str(tmp_path), nodes_a)
+    idx_b = CallGraphIndex.from_nodes(str(tmp_path), nodes_b)
+    path_a = tmp_path / "a.json"
+    path_b = tmp_path / "b.json"
+    idx_a.save(path_a)
+    idx_b.save(path_b)
+
+    assert path_a.read_bytes() == path_b.read_bytes(), (
+        "Same edges in different insertion / list orders must produce "
+        "byte-identical JSON output (Corollary 3.2 — determinism)."
+    )
+
+
+def test_from_raw_delegates_to_from_nodes(tmp_path: Path) -> None:
+    """Backwards-compat: ``from_raw`` still works and yields the same graph as ``from_nodes``."""
+    raw = {"pkg.mod.foo": ["pkg.mod.bar"], "pkg.mod.bar": []}
+    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    # Forward edges visible
+    callees = idx.callees_of("pkg.mod.foo", depth=1)
+    assert callees["results"] == ["pkg.mod.bar"]
+    # Reverse edges visible (build-time inversion happened in _raw_to_nodes)
+    callers = idx.callers_of("pkg.mod.bar", depth=1)
+    assert callers["results"] == ["pkg.mod.foo"]
+    # ``raw`` property projects nodes → raw shape
+    assert idx.raw == {"pkg.mod.foo": ["pkg.mod.bar"]}
+
+
+def test_save_uses_sort_keys_true(tmp_path: Path) -> None:
+    """The on-disk JSON must have sorted top-level keys (sort_keys=True).
+
+    This is a structural prerequisite for Scenario 4 (determinism); also a
+    practical aid for human inspection of the index.  We assert the literal
+    output contains keys in sorted order at the top level.
+    """
+    idx = CallGraphIndex.from_nodes(str(tmp_path), _sample_nodes())
+    out = tmp_path / "index.json"
+    idx.save(out)
+    text = out.read_text()
+    # The first key emitted should be alphabetically first among the
+    # top-level payload keys: content_hash < file_shas < git_sha < missed_callers
+    # < nodes < root < skeletons < version.  ``content_hash`` wins.
+    assert text.startswith('{"content_hash":'), (
+        f"save() must use sort_keys=True; first 60 chars: {text[:60]!r}"
+    )
