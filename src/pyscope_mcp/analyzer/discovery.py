@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from .imports import build_import_table
 from .resolution import attr_chain
 
 # Sentinel FQN strings for builtin/pathlib types that are NOT in known_fqns but

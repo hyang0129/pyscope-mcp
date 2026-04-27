@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypedDict
 
-INDEX_VERSION = 5
-
 from pyscope_mcp.types import (
     CalleesResult,
     CallersResult,
@@ -19,6 +17,8 @@ from pyscope_mcp.types import (
     SearchResult,
     StatsResult,
 )
+
+INDEX_VERSION = 5
 
 
 class SymbolSummary(TypedDict):

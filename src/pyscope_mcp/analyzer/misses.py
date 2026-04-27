@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ast
 import builtins
-import collections
 from collections import Counter
 
 from .resolution import attr_chain
