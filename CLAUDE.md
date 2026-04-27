@@ -42,11 +42,11 @@ Everything downstream (`CallGraphIndex.from_raw`, save/load, the MCP tools) alre
 
 Fully-qualified dotted paths are the primary ID. Matches LSP and what downstream code expects. Don't invent alternative schemes (`{kind}:{relpath}:{name}` etc.) — they collide on overloads and break interop.
 
-### Unresolved edges (forthcoming)
+### Unresolved edges
 
-Dynamic patterns (string-keyed registries, `getattr`, duck typing, decorators returning callable-class instances, LLM tool-use) cannot be resolved statically. The current shape silently drops them. **Preferred direction:** keep these call sites in the graph but tag them with a confidence score (axon pattern) — either `{caller: [(callee, confidence), ...]}` or a parallel `low_confidence` dict. This is a schema change; bump the version when landing.
+Dynamic patterns (string-keyed registries, `getattr`, duck typing, decorators returning callable-class instances, LLM tool-use) cannot be resolved statically. The current shape drops them from the graph by design — Law 1 forbids uncertain edges, and the constitution's Rejected Alternatives explicitly rules out axon-style confidence scoring. Unresolved call sites belong in `misses.json` for telemetry, not in the graph.
 
-Until that lands, absence of an edge is **weak** evidence — treat the graph as "definite edges, silent false negatives."
+Absence of an edge is **weak** evidence — treat the graph as "definite edges, silent false negatives." The compensating signal is `misses.json`, not a low-confidence edge surface.
 
 ## Core convention: precomputed-and-saved index
 
