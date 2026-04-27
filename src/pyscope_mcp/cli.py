@@ -59,9 +59,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         out = (root / out).resolve()
 
     print(f"[pyscope-mcp] building index: root={root} package={package or root.name}", file=sys.stderr)
-    from pyscope_mcp.analyzer import build_with_report
+    from pyscope_mcp.analyzer import build_nodes_with_report
 
-    raw, miss_report, skeletons, file_shas = build_with_report(root, package=package or root.name)
+    nodes, miss_report, skeletons, file_shas = build_nodes_with_report(
+        root, package=package or root.name
+    )
 
     # Inline missed_callers into index.json at build time (Law 3: single artifact).
     # Aggregate per-caller pattern counts from the flat unresolved_calls list.
@@ -91,8 +93,8 @@ def cmd_build(args: argparse.Namespace) -> int:
     except FileNotFoundError:
         pass  # git binary not installed
 
-    idx = CallGraphIndex.from_raw(
-        root, raw, skeletons=skeletons, file_shas=file_shas, missed_callers=missed_callers,
+    idx = CallGraphIndex.from_nodes(
+        root, nodes, skeletons=skeletons, file_shas=file_shas, missed_callers=missed_callers,
         git_sha=git_sha,
     )
     idx.save(out)

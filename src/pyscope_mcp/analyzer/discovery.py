@@ -374,13 +374,18 @@ def collect_self_attr_types(
     return result
 
 
-def _resolve_annotation(
+def resolve_annotation(
     annotation: ast.expr,
     module_fqn: str,
     import_table: dict[str, str],
     known_fqns: set[str],
 ) -> str | None:
-    """Resolve a type annotation expression to an in-package FQN, or None."""
+    """Resolve a type annotation expression to an in-package FQN, or None.
+
+    Public helper exposed for use by ``EdgeVisitor`` (epic #76 child #2 — emits
+    annotation kind edges).  The discovery-internal call sites continue to use
+    the ``_resolve_annotation`` alias below for stylistic continuity.
+    """
     if isinstance(annotation, ast.Name):
         name = annotation.id
         if name in import_table:
@@ -407,6 +412,11 @@ def _resolve_annotation(
     if dotted in known_fqns:
         return dotted
     return None
+
+
+# Backwards-compatible internal alias.  Prefer ``resolve_annotation`` in new
+# code; this alias keeps the existing private call sites in this module stable.
+_resolve_annotation = resolve_annotation
 
 
 def _infer_type(
