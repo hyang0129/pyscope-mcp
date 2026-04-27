@@ -432,13 +432,11 @@ class CallGraphIndex:
         if path not in self.skeletons:
             result: dict = {
                 "isError": True,
-                "stale": True,
+                "error_reason": "path_not_in_index",
+                "stale": False,
                 "stale_files": [],
-                "stale_action": self._STALE_ACTION,
                 **commit,
             }
-            if self.file_shas is None:
-                result["index_stale_reason"] = "index_format_incompatible"
             return result
 
         symbols = self.skeletons[path]
@@ -528,7 +526,21 @@ class CallGraphIndex:
         Response includes uniform staleness fields (``stale``, ``stale_files``,
         and optionally ``stale_action`` / ``index_stale_reason``) and a
         ``completeness`` field (``"complete"`` or ``"partial"``).
+
+        If *fqn* is not present in the graph at all, returns an error dict
+        with ``isError: True``, ``error_reason: "fqn_not_in_graph"``, and
+        ``stale: False``.  An FQN that is present but has zero callers returns
+        ``results: []`` (not an error).
         """
+        if fqn not in self.function_graph.nodes:
+            commit = self._commit_staleness()
+            return {  # type: ignore[return-value]
+                "isError": True,
+                "error_reason": "fqn_not_in_graph",
+                "stale": False,
+                "stale_files": [],
+                **commit,
+            }
         rev_fg = self.function_graph.reverse(copy=False)
         bfs_result = _bfs(rev_fg, fqn, depth)
         ranked = self._rank_bfs_results(bfs_result, rev_fg)
@@ -557,7 +569,21 @@ class CallGraphIndex:
         Response includes uniform staleness fields (``stale``, ``stale_files``,
         and optionally ``stale_action`` / ``index_stale_reason``) and a
         ``completeness`` field (``"complete"`` or ``"partial"``).
+
+        If *fqn* is not present in the graph at all, returns an error dict
+        with ``isError: True``, ``error_reason: "fqn_not_in_graph"``, and
+        ``stale: False``.  An FQN that is present but has zero callees returns
+        ``results: []`` (not an error).
         """
+        if fqn not in self.function_graph.nodes:
+            commit = self._commit_staleness()
+            return {  # type: ignore[return-value]
+                "isError": True,
+                "error_reason": "fqn_not_in_graph",
+                "stale": False,
+                "stale_files": [],
+                **commit,
+            }
         fg = self.function_graph
         bfs_result = _bfs(fg, fqn, depth)
         ranked = self._rank_bfs_results(bfs_result, fg)
@@ -617,6 +643,17 @@ class CallGraphIndex:
         """
         fg = self.function_graph
         rev_fg = fg.reverse(copy=False)
+
+        # Guard: FQN not in graph at all → clear not-found error (not ambiguous empty-edges)
+        if symbol not in fg.nodes:
+            commit = self._commit_staleness()
+            return {  # type: ignore[return-value]
+                "isError": True,
+                "error_reason": "fqn_not_in_graph",
+                "stale": False,
+                "stale_files": [],
+                **commit,
+            }
 
         # Resolve effective threshold for this query
         effective_threshold: int = (

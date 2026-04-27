@@ -493,6 +493,54 @@ def test_module_callers_depth1_precede_depth2_when_alphabetical_would_invert() -
 
 
 # ---------------------------------------------------------------------------
+# callers_of / callees_of — not-found error shape
+# ---------------------------------------------------------------------------
+
+def test_callers_of_fqn_not_in_graph() -> None:
+    """callers_of with a nonexistent FQN returns isError:true, error_reason:'fqn_not_in_graph', stale:false."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    result = idx.callers_of("no.such.fqn")
+    assert result["isError"] is True
+    assert result["error_reason"] == "fqn_not_in_graph"
+    assert result["stale"] is False
+    assert result["stale_files"] == []
+    assert "stale_action" not in result
+
+
+def test_callees_of_fqn_not_in_graph() -> None:
+    """callees_of with a nonexistent FQN returns isError:true, error_reason:'fqn_not_in_graph', stale:false."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    result = idx.callees_of("no.such.fqn")
+    assert result["isError"] is True
+    assert result["error_reason"] == "fqn_not_in_graph"
+    assert result["stale"] is False
+    assert result["stale_files"] == []
+    assert "stale_action" not in result
+
+
+def test_callers_of_known_zero_callers() -> None:
+    """callers_of on an FQN with no callers returns results:[], not an error."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    # sample.a.top has no callers
+    result = idx.callers_of("sample.a.top")
+    assert result.get("isError") is not True
+    assert result["results"] == []
+    # Not a not-found error; staleness value depends on test fixture setup
+    assert "error_reason" not in result
+
+
+def test_callees_of_known_zero_callees() -> None:
+    """callees_of on an FQN with no callees returns results:[], not an error."""
+    idx = CallGraphIndex.from_raw("/tmp/sample", _sample_raw())
+    # sample.b.inner has no callees
+    result = idx.callees_of("sample.b.inner")
+    assert result.get("isError") is not True
+    assert result["results"] == []
+    # Not a not-found error; staleness value depends on test fixture setup
+    assert "error_reason" not in result
+
+
+# ---------------------------------------------------------------------------
 # neighborhood
 # ---------------------------------------------------------------------------
 
@@ -550,12 +598,14 @@ def test_neighborhood_token_budget_enforced() -> None:
 
 
 def test_neighborhood_unknown_symbol() -> None:
-    """neighborhood on a symbol not in the graph returns empty edges, truncated=False."""
+    """neighborhood on a symbol not in the graph returns isError:true, error_reason:'fqn_not_in_graph', stale:false."""
     idx = CallGraphIndex.from_raw("/tmp/sample", _neighborhood_raw())
     result = idx.neighborhood("nonexistent.symbol", depth=2, token_budget=1000)
-    assert result["symbol"] == "nonexistent.symbol"
-    assert result["edges"] == []
-    assert result["truncated"] is False
+    assert result["isError"] is True
+    assert result["error_reason"] == "fqn_not_in_graph"
+    assert result["stale"] is False
+    assert result["stale_files"] == []
+    assert "stale_action" not in result
 
 
 def test_neighborhood_depth_full_reflects_graph() -> None:
@@ -766,9 +816,17 @@ def test_hub_threshold_attribute_reflects_distribution() -> None:
 
 
 def test_neighborhood_hub_fields_always_present_isolated() -> None:
-    """hub_suppressed and hub_threshold are present even for isolated/unknown symbols."""
-    idx = CallGraphIndex.from_raw("/tmp/sample", _neighborhood_raw())
-    result = idx.neighborhood("nonexistent.symbol", depth=2, token_budget=10000)
+    """hub_suppressed and hub_threshold are present even for isolated symbols (present in graph, no edges)."""
+    # Use a symbol that IS in the graph but has no edges — isolated but present.
+    # We add "b.isolated" as a standalone caller with an empty callees list.
+    raw = _neighborhood_raw()
+    raw["b.isolated"] = []
+    idx = CallGraphIndex.from_raw("/tmp/sample", raw)
+    result = idx.neighborhood("b.isolated", depth=2, token_budget=10000)
+    # An isolated-but-present node returns empty edges, not an error
+    assert result.get("isError") is not True
+    assert result["edges"] == []
+    assert result["truncated"] is False
     assert "hub_suppressed" in result
     assert "hub_threshold" in result
     assert result["hub_suppressed"] == []

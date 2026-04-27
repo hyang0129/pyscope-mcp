@@ -1021,9 +1021,9 @@ async def test_notification_handler_raises_silent(server: RpcServer):
     "name,arguments,expect_error",
     [
         # Wrong-type fqn: truthy values that aren't in the graph.
-        # _bfs handles unknown starts gracefully → empty list, isError:false.
-        ("callers_of",     {"fqn": 123},                             False),
-        ("callees_of",     {"fqn": 123},                             False),
+        # The not-in-graph check fires before _bfs → isError:true.
+        ("callers_of",     {"fqn": 123},                             True),
+        ("callees_of",     {"fqn": 123},                             True),
         # Non-string module: str.startswith raises TypeError → isError:true.
         ("module_callers", {"module": True},                         True),
         # List-typed module: unhashable → TypeError on dict lookup → isError:true.
@@ -1171,14 +1171,15 @@ async def test_tool_neighborhood_missing_symbol(server: RpcServer):
 
 @pytest.mark.asyncio
 async def test_tool_neighborhood_unknown_symbol(server: RpcServer):
-    """neighborhood on a symbol not in the graph returns empty edges, not an error."""
+    """neighborhood on a symbol not in the graph returns isError:true, error_reason:'fqn_not_in_graph'."""
     lines = [_req("tools/call", {"name": "neighborhood", "arguments": {"symbol": "not.in.graph"}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]["result"]
-    assert r["isError"] is False
+    assert r["isError"] is True
     payload = json.loads(r["content"][0]["text"])
-    assert payload["edges"] == []
-    assert payload["truncated"] is False
+    assert payload["isError"] is True
+    assert payload["error_reason"] == "fqn_not_in_graph"
+    assert payload["stale"] is False
 
 
 @pytest.mark.asyncio

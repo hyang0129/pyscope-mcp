@@ -549,6 +549,60 @@ def test_callers_of_stale_e2e_wire(tmp_path: Path) -> None:
             proc.wait(timeout=2)
 
 
+def test_callers_of_fqn_not_in_graph_e2e(index_path: Path) -> None:
+    """E2E: callers_of with a nonexistent FQN returns isError:true + error_reason over real stdio pipes."""
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "serve",
+            "--root", str(repo_root),
+            "--index", str(index_path),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-not-found", "version": "0"},
+            },
+        })
+        r = _recv(proc)
+        assert r["id"] == 1
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # Call callers_of with a FQN that cannot be in the index
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "callers_of", "arguments": {"fqn": "no.such.fqn.at.all"}},
+        })
+        r = _recv(proc)
+        assert r["id"] == 2
+        assert "error" not in r, f"unexpected JSON-RPC error: {r}"
+        # The MCP result must carry isError:true at the top level
+        assert r["result"]["isError"] is True
+        # The body text must contain error_reason
+        body = json.loads(r["result"]["content"][0]["text"])
+        assert body["isError"] is True
+        assert body["error_reason"] == "fqn_not_in_graph"
+        assert body["stale"] is False
+        assert "stale_action" not in body
+
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r = _recv(proc)
+        assert r == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
 def test_shutdown_then_eof_exits_zero(index_path: Path) -> None:
     """Full lifecycle: shutdown → stdin EOF → exit 0."""
     repo_root = Path(__file__).resolve().parents[1]
@@ -649,17 +703,19 @@ def test_completeness_field_e2e(tmp_path: Path) -> None:
             f"full body: {body2}"
         )
 
-        # baz has no callers and no missed_callers entry → complete
+        # bar has no callers and no missed_callers entry for bar-as-callee → complete
+        # (bar IS in the graph as a caller of foo, so callers_of(bar) returns results:[])
         _send(proc, {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.baz"}},
+            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.bar"}},
         })
         r3 = _recv(proc)
         assert r3["id"] == 3
         assert "error" not in r3, f"unexpected JSON-RPC error: {r3}"
         body3 = json.loads(r3["result"]["content"][0]["text"])
+        assert body3.get("isError") is not True, f"bar is in graph and should not be an error: {body3}"
         assert body3["completeness"] == "complete", (
-            f"expected complete for baz; got completeness={body3.get('completeness')!r}\n"
+            f"expected complete for bar; got completeness={body3.get('completeness')!r}\n"
             f"full body: {body3}"
         )
 

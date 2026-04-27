@@ -126,7 +126,10 @@ _TOOL_LIST = [
             "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
             "treating the result as exhaustive. "
             "'complete' means no result FQN (or its class siblings) appears in the miss log. "
-            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}. "
+            "If the FQN is not in the index at all, returns {isError: true, error_reason: 'fqn_not_in_graph', stale: false, stale_files: []} — "
+            "this means the FQN is wrong; rebuilding the index will not help. "
+            "An FQN with zero callers returns results: [] (not an error)."
         ),
         "inputSchema": {
             "type": "object",
@@ -156,7 +159,10 @@ _TOOL_LIST = [
             "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
             "treating the result as exhaustive. "
             "'complete' means no result FQN (or its class siblings) appears in the miss log. "
-            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}."
+            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}. "
+            "If the FQN is not in the index at all, returns {isError: true, error_reason: 'fqn_not_in_graph', stale: false, stale_files: []} — "
+            "this means the FQN is wrong; rebuilding the index will not help. "
+            "An FQN with zero callees returns results: [] (not an error)."
         ),
         "inputSchema": {
             "type": "object",
@@ -275,13 +281,14 @@ _TOOL_LIST = [
             "Response always includes `stale: bool` and `stale_files: list[str]`. "
             "When stale is true, `stale_files` lists the relative paths of changed files "
             "and `stale_action` provides a remediation string. "
-            "If the file was added after the last build, returns isError:true alongside stale fields. "
+            "If the path is not in the index, returns {isError: true, error_reason: 'path_not_in_index', stale: false, stale_files: []} "
+            "with no stale_action — this means the path is wrong; rebuilding the index will not help. "
             "For pre-v3 indexes, `index_stale_reason: 'index_format_incompatible'` is set. "
             "Response includes commit-level staleness: `commit_stale: bool|null`, "
             "`index_git_sha: str|null`, `head_git_sha: str|null`. "
             "Returns {results: [...], truncated: bool, total: int, stale: bool, stale_files: [...], "
             "stale_action?: str, commit_stale, index_git_sha, head_git_sha} or "
-            "{isError: true, stale: true, stale_files: [], stale_action: str, commit_stale, ...}."
+            "{isError: true, error_reason: str, stale: false, stale_files: [], commit_stale, ...}."
         ),
         "inputSchema": {
             "type": "object",
@@ -328,7 +335,11 @@ _TOOL_LIST = [
             "Returns {symbol, depth_full, depth_truncated?, edges: [[caller, callee], ...], "
             "truncated: bool, token_budget_used: int, completeness: str, "
             "hub_suppressed: list[str], hub_threshold: int, stale: bool, stale_files: [...], "
-            "commit_stale, index_git_sha, head_git_sha}."
+            "commit_stale, index_git_sha, head_git_sha}. "
+            "If the symbol FQN is not in the index at all, returns "
+            "{isError: true, error_reason: 'fqn_not_in_graph', stale: false, stale_files: []} — "
+            "this means the FQN is wrong; rebuilding the index will not help. "
+            "A symbol that is present but has no edges returns edges: [] (not an error)."
         ),
         "inputSchema": {
             "type": "object",
@@ -511,13 +522,19 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
         fqn = arguments.get("fqn")
         if not fqn:
             return _error_result("callers_of requires 'fqn'")
-        return _text(idx.callers_of(fqn, int(arguments.get("depth", 1))))
+        result = idx.callers_of(fqn, int(arguments.get("depth", 1)))
+        if result.get("isError"):
+            return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
+        return _text(result)
 
     if name == "callees_of":
         fqn = arguments.get("fqn")
         if not fqn:
             return _error_result("callees_of requires 'fqn'")
-        return _text(idx.callees_of(fqn, int(arguments.get("depth", 1))))
+        result = idx.callees_of(fqn, int(arguments.get("depth", 1)))
+        if result.get("isError"):
+            return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
+        return _text(result)
 
     if name == "module_callers":
         module = arguments.get("module")
@@ -557,7 +574,10 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
         expand_hubs = bool(arguments.get("expand_hubs", False))
         hub_threshold_raw = arguments.get("hub_threshold")
         hub_threshold = int(hub_threshold_raw) if hub_threshold_raw is not None else None
-        return _text(idx.neighborhood(symbol, depth, token_budget, expand_hubs=expand_hubs, hub_threshold=hub_threshold))
+        result = idx.neighborhood(symbol, depth, token_budget, expand_hubs=expand_hubs, hub_threshold=hub_threshold)
+        if result.get("isError"):
+            return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
+        return _text(result)
 
     # Should never reach here — guarded by _TOOL_NAMES check above
     return _error_result(f"unknown tool: {name!r}")
