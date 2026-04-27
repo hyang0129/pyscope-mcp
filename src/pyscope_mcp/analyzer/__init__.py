@@ -22,12 +22,13 @@ from .discovery import (
 )
 from .imports import build_import_table as _build_import_table
 from .misses import MissLog, classify_miss as _classify_miss
-from .pipeline import build_raw, build_with_report
+from .pipeline import build_nodes_with_report, build_raw, build_with_report
 from .visitor import EdgeVisitor as _EdgeVisitor
 
 __all__ = [
     "build_raw",
     "build_with_report",
+    "build_nodes_with_report",
     "MissLog",
     # Private names re-exported for existing tests / callers:
     "_collect_defs",
