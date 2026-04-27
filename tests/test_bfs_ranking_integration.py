@@ -123,7 +123,9 @@ def test_analyzer_resolves_all_depth1_callers(callers_idx: CallGraphIndex) -> No
     """
     target = "ranking_callers_fixture.target.target_fn"
     direct_callers = {
-        fqn for fqn, callees in callers_idx.raw.items() if target in callees
+        fqn
+        for fqn, node in callers_idx.nodes.items()
+        if target in node.get("calls", {}).get("call", [])
     }
     expected = {f"ranking_callers_fixture.zdepth1.z_caller_{i:02d}"
                 for i in range(1, _N_DEPTH1 + 1)}

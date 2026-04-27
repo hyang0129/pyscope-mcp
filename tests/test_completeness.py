@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex, SymbolSummary
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +50,9 @@ def _make_idx(
     file_shas: dict[str, str] | None = None,
     git_sha: str | None = None,
 ) -> CallGraphIndex:
-    return CallGraphIndex.from_raw(
+    return CallGraphIndex.from_nodes(
         "/tmp/test",
-        raw,
+        make_nodes(raw),
         skeletons=skeletons or {},
         file_shas=file_shas or {},
         missed_callers=missed_callers or {},

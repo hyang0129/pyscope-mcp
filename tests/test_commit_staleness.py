@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex, SymbolSummary
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -40,11 +41,7 @@ def _make_idx(
     raw: dict[str, list[str]] | None = None,
     git_sha: str | None = None,
 ) -> CallGraphIndex:
-    return CallGraphIndex.from_raw(
-        str(tmp_path),
-        raw or {},
-        git_sha=git_sha,
-    )
+    return CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw or {}), git_sha=git_sha)
 
 
 _MOCK_HEAD = "abcdef1234567890abcdef1234567890abcdef12"
@@ -130,12 +127,7 @@ def _make_idx_with_raw(tmp_path: Path, git_sha: str = _MOCK_INDEX_SHA) -> CallGr
         "pkg.mod.fn_a": ["pkg.mod.fn_b"],
         "pkg.mod.fn_b": [],
     }
-    return CallGraphIndex.from_raw(
-        str(tmp_path),
-        raw,
-        file_shas={},
-        git_sha=git_sha,
-    )
+    return CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), file_shas={}, git_sha=git_sha)
 
 
 def test_callers_of_includes_commit_staleness(tmp_path: Path) -> None:
@@ -211,13 +203,7 @@ def test_file_skeleton_includes_commit_staleness(tmp_path: Path) -> None:
     (tmp_path / "mod.py").write_text("def fn_a(): pass\n")
     import hashlib
     shas = {"mod.py": hashlib.sha256(b"def fn_a(): pass\n").hexdigest()}
-    idx = CallGraphIndex.from_raw(
-        str(tmp_path),
-        {},
-        skeletons=skeletons,
-        file_shas=shas,
-        git_sha=_MOCK_INDEX_SHA,
-    )
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons=skeletons, file_shas=shas, git_sha=_MOCK_INDEX_SHA)
     with patch("subprocess.run", return_value=_mock_git_success(_MOCK_HEAD)):
         result = idx.file_skeleton("mod.py")
     assert "commit_stale" in result
@@ -234,7 +220,7 @@ def server_with_index(tmp_path: Path):
     from pyscope_mcp import server as srv
 
     raw = {"pkg.mod.fn_a": ["pkg.mod.fn_b"], "pkg.mod.fn_b": []}
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=_MOCK_INDEX_SHA)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
     index_path = tmp_path / "index.json"
     idx.save(index_path)
 

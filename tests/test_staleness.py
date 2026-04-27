@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex, SymbolSummary
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ def _make_idx(
     skeletons: dict[str, list[SymbolSummary]],
     file_shas: dict[str, str] | None,
 ) -> CallGraphIndex:
-    return CallGraphIndex.from_raw(str(tmp_path), raw, skeletons=skeletons, file_shas=file_shas)
+    return CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), skeletons=skeletons, file_shas=file_shas)
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ def test_fqn_to_file_populated(tmp_path: Path) -> None:
         "src/pkg/mod.py": [_sym("pkg.mod.fn_a"), _sym("pkg.mod.fn_b")],
         "src/pkg/other.py": [_sym("pkg.other.fn_c")],
     }
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons=skeletons, file_shas={})
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons=skeletons, file_shas={})
     assert idx._fqn_to_file["pkg.mod.fn_a"] == "src/pkg/mod.py"
     assert idx._fqn_to_file["pkg.mod.fn_b"] == "src/pkg/mod.py"
     assert idx._fqn_to_file["pkg.other.fn_c"] == "src/pkg/other.py"
@@ -57,7 +58,7 @@ def test_fqn_to_file_populated(tmp_path: Path) -> None:
 
 def test_fqn_to_file_empty_skeletons(tmp_path: Path) -> None:
     """Empty skeletons produce an empty _fqn_to_file."""
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={}, file_shas={})
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={}, file_shas={})
     assert idx._fqn_to_file == {}
 
 

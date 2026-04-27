@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex
+from conftest import make_nodes
 
 # ---------------------------------------------------------------------------
 # Shared fixtures / helpers
@@ -136,7 +137,7 @@ class TestB1GraphToTypes:
         merge from **commit to a manual copy could omit or coerce fields.
         """
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=_MOCK_INDEX_SHA)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
 
         with patch("subprocess.run", return_value=_git_ok(_MOCK_HEAD_SHA)):
             result = idx.callers_of("pkg.mod.beta", depth=1)
@@ -165,7 +166,7 @@ class TestB1GraphToTypes:
         would be absent from the dict entirely rather than present with None.
         """
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=_MOCK_INDEX_SHA)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
 
         with patch("subprocess.run", side_effect=FileNotFoundError("no git")):
             result = idx.stats()
@@ -187,7 +188,7 @@ class TestB1GraphToTypes:
         to SearchResult; a merge that drops the value would silently be False/None.
         """
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=_MOCK_INDEX_SHA)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
 
         with patch("subprocess.run", return_value=_git_ok(_MOCK_HEAD_SHA)):
             result = idx.search("alpha")
@@ -215,7 +216,7 @@ class TestB2ServerGraphBuildRpcLoop:
     def _wired_server(self, tmp_path: Path):
         """Server fixture with a real saved index, hooked into the RPC loop."""
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=_MOCK_INDEX_SHA)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
         idx_path = tmp_path / "index.json"
         idx.save(idx_path)
 

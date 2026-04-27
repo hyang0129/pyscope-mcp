@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex
+from conftest import make_nodes
 import pyscope_mcp.server as _srv
 
 
@@ -70,9 +71,9 @@ def _make_index_with_skeleton(tmp_path: Path) -> CallGraphIndex:
     # omit file_shas (pre-v3 mode triggers stale=True) or provide matching shas.
     # Use file_shas=None to get pre-v3 staleness path — that still exercises the
     # success case skeleton content correctly.
-    return CallGraphIndex.from_raw(
+    return CallGraphIndex.from_nodes(
         str(tmp_path),
-        raw,
+        make_nodes(raw),
         skeletons=skeletons,
         file_shas=None,  # pre-v3: stale=True path, but results still returned
     )
@@ -153,7 +154,7 @@ class TestB1FqnNotFoundErrorPropagation:
     def _wired_server(self, tmp_path: Path):
         """Server fixture with a real in-memory index, wired into the RPC loop."""
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=None)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=None)
         idx_path = tmp_path / "index.json"
         idx.save(idx_path)
 
@@ -182,7 +183,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -202,7 +203,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """[B1-graph] callees_of with absent FQN returns isError:True dict."""
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -218,7 +219,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """[B1-graph] neighborhood with absent FQN returns isError:True dict."""
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -240,7 +241,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """
         # Arrange — pkg.other.gamma has no callers in the raw graph
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -261,7 +262,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """[B1-graph] callees_of a known FQN with zero callees returns results:[] not isError."""
         # Arrange — pkg.mod.beta has no callees
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -279,7 +280,7 @@ class TestB1FqnNotFoundErrorPropagation:
         # Arrange — add a node with no edges
         raw = _make_minimal_raw()
         raw["pkg.mod.isolated"] = []
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
@@ -310,7 +311,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
         _srv._INDEX = idx
         _srv._INDEX_PATH = tmp_path / "index.json"
 
@@ -340,7 +341,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """[B1-server] _dispatch_tool('callees_of', bad FQN) surfaces isError:true."""
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
         _srv._INDEX = idx
         _srv._INDEX_PATH = tmp_path / "index.json"
 
@@ -364,7 +365,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """[B1-server] _dispatch_tool('neighborhood', bad FQN) surfaces isError:true."""
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
         _srv._INDEX = idx
         _srv._INDEX_PATH = tmp_path / "index.json"
 
@@ -391,7 +392,7 @@ class TestB1FqnNotFoundErrorPropagation:
         """
         # Arrange
         raw = _make_minimal_raw()
-        idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+        idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
         _srv._INDEX = idx
         _srv._INDEX_PATH = tmp_path / "index.json"
 

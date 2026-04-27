@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import make_nodes
+
 
 def _send(proc: subprocess.Popen, msg: dict) -> None:
     assert proc.stdin is not None
@@ -51,7 +53,7 @@ def index_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "pkg.mod.bar": [],
     }
     out_dir = tmp_path_factory.mktemp("pyscope_idx")
-    idx = CallGraphIndex.from_raw(out_dir, raw)
+    idx = CallGraphIndex.from_nodes(out_dir, make_nodes(raw))
     out = out_dir / "index.json"
     idx.save(out)
     return out
