@@ -124,27 +124,87 @@ class _DiGraphReverseView:
         )
 
 
-def _compute_content_hash(raw: dict[str, list[str]]) -> str:
-    """Return SHA-256 hex digest of the deterministically serialised *raw* dict.
+def _compute_content_hash(nodes: dict[str, dict]) -> str:
+    """Return SHA-256 hex digest of the deterministically serialised *nodes* dict.
+
+    Hashes the canonical (sorted) projection of the call edges in the
+    site-keyed shape: ``nodes[caller]["calls"]["call"]``.  Only ``call`` edges
+    contribute today (matching pre-migration semantics so freshness checks
+    survive the schema bump for repos that have not added other kinds yet).
 
     Sorted keys and sorted callee lists ensure the same graph always yields
     the same hash, regardless of insertion order.
     """
-    canonical = json.dumps(
-        {k: sorted(v) for k, v in sorted(raw.items())},
-        separators=(",", ":"),
-    ).encode()
+    projection: dict[str, list[str]] = {}
+    for caller in sorted(nodes):
+        record = nodes[caller]
+        callees = list(record.get("calls", {}).get("call", ()))
+        if callees:
+            projection[caller] = sorted(callees)
+    canonical = json.dumps(projection, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _raw_to_nodes(raw: dict[str, list[str]]) -> dict[str, dict]:
+    """Convert legacy ``raw`` (caller → [callees]) to site-keyed ``nodes`` shape.
+
+    Build-time inversion: every ``(caller, callee)`` pair in *raw* yields
+    ``nodes[caller]["calls"]["call"]`` (forward) and
+    ``nodes[callee]["called_by"]["call"]`` (reverse).  Both endpoints get a
+    ``NodeRecord`` skeleton with sorted, deduplicated lists per kind so the
+    serialisation determinism invariant (Corollary 3.2) holds regardless of
+    insertion order.
+    """
+    forward: dict[str, set[str]] = {}
+    reverse: dict[str, set[str]] = {}
+    for caller, callees in raw.items():
+        forward.setdefault(caller, set()).update(callees)
+        for callee in callees:
+            reverse.setdefault(callee, set()).add(caller)
+            forward.setdefault(callee, set())  # ensure callee node exists
+        # Keep callers with empty callee list as nodes too.
+        forward.setdefault(caller, set())
+
+    all_symbols = set(forward) | set(reverse)
+    nodes: dict[str, dict] = {}
+    for sym in sorted(all_symbols):
+        record: dict[str, dict[str, list[str]]] = {"calls": {}, "called_by": {}}
+        callees = forward.get(sym, set())
+        if callees:
+            record["calls"]["call"] = sorted(callees)
+        callers = reverse.get(sym, set())
+        if callers:
+            record["called_by"]["call"] = sorted(callers)
+        nodes[sym] = record
+    return nodes
+
+
+def _nodes_to_raw(nodes: dict[str, dict]) -> dict[str, list[str]]:
+    """Project the site-keyed ``nodes`` shape back to the legacy ``raw`` form.
+
+    Used to support the deprecated ``raw`` property and ``from_raw`` constructor
+    while Child #3 of epic #76 migrates the test corpus.  Only ``call`` edges
+    appear in the projection — non-call kinds are not part of the legacy
+    contract and are silently omitted (they remain available via
+    ``CallGraphIndex.nodes``).
+    """
+    out: dict[str, list[str]] = {}
+    for caller in sorted(nodes):
+        callees = nodes[caller].get("calls", {}).get("call")
+        if callees:
+            out[caller] = sorted(callees)
+    return out
 
 
 @dataclass
 class CallGraphIndex:
     """Function- and module-level call graph over a Python repo.
 
-    The source of truth is `raw`: a mapping {caller_fqn: [callee_fqn, ...]}.
-    Graphs are derived from `raw` on construction and on `load`. The backend
-    that populates `raw` from source code lives in pyscope_mcp.analyzer
-    (AST-based; fully implemented — see CLAUDE.md for the contract).
+    The source of truth is ``nodes``: a site-keyed mapping
+    ``{symbol_fqn: {"calls": {kind: [callees]}, "called_by": {kind: [callers]}}}``.
+    Graphs are derived from ``nodes[s]["calls"]["call"]`` on construction and
+    on ``load``.  The legacy ``raw`` property projects the same call edges in
+    the pre-migration shape for transitional callers.
 
     ``skeletons`` maps relative file paths → pre-computed lists of SymbolSummary
     dicts, populated during ``pyscope-mcp build`` (index version 2+).
@@ -153,7 +213,9 @@ class CallGraphIndex:
     root: Path
     function_graph: _DiGraph = field(default_factory=_DiGraph)
     module_graph: _DiGraph = field(default_factory=_DiGraph)
-    raw: dict[str, list[str]] = field(default_factory=dict)
+    # v5+: site-keyed nodes — replaces the legacy ``raw`` field.  The ``raw``
+    # property below derives a call-only projection for transitional callers.
+    nodes: dict[str, dict] = field(default_factory=dict)
     skeletons: dict[str, list[SymbolSummary]] = field(default_factory=dict)
     # None = pre-v3 index (no hashes stored); dict = v3/v5 index with per-file SHA256 digests.
     file_shas: dict[str, str] | None = field(default=None)
@@ -169,27 +231,49 @@ class CallGraphIndex:
     # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
     # Not serialised — rebuilt on every load.
     _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
-    # Computed at from_raw time: p99 of in-degree distribution, floor of 10.
+    # Computed at from_nodes time: p99 of in-degree distribution, floor of 10.
     # Used by neighborhood() for hub suppression. Not serialised — recomputed on load.
     _in_degree_threshold: int = field(default=10, repr=False)
 
+    @property
+    def raw(self) -> dict[str, list[str]]:
+        """Legacy projection of ``nodes`` to ``{caller: [callees]}`` (call edges only).
+
+        Provided as a transitional read-only view for callers that have not
+        migrated to the ``nodes`` shape yet (Child #3 of epic #76 migrates
+        the remaining test fixtures).  New code should consume ``nodes``
+        directly to keep access to non-call edge kinds.
+        """
+        return _nodes_to_raw(self.nodes)
+
     @classmethod
-    def from_raw(
+    def from_nodes(
         cls,
         root: str | Path,
-        raw: dict[str, list[str]],
+        nodes: dict[str, dict],
         skeletons: dict[str, list[SymbolSummary]] | None = None,
         file_shas: dict[str, str] | None = None,
         missed_callers: dict[str, dict[str, int]] | None = None,
         git_sha: str | None = None,
     ) -> "CallGraphIndex":
+        """Construct a CallGraphIndex from the site-keyed ``nodes`` shape.
+
+        Populates ``function_graph`` and ``module_graph`` from
+        ``nodes[s]["calls"]["call"]`` only — non-call kinds are stored in
+        ``nodes`` but are not used by the existing graph traversal layer
+        (see Decision Prior "Keep _DiGraph" in epic #76's intent doc).
+        """
         root = Path(root).resolve()
         fg = _DiGraph()
         mg = _DiGraph()
-        for caller, callees in raw.items():
+        # Ensure every site key is a graph node, even when its calls bucket
+        # is empty (so callers_of returns empty results, not fqn_not_in_graph).
+        for caller in nodes:
             fg.add_node(caller)
+            mg.add_node(_module_of(caller))
+        for caller, record in nodes.items():
+            callees = record.get("calls", {}).get("call", ())
             cm = _module_of(caller)
-            mg.add_node(cm)
             for callee in callees:
                 fg.add_edge(caller, callee)
                 tm = _module_of(callee)
@@ -202,16 +286,14 @@ class CallGraphIndex:
             for sym in symbols:
                 fqn_to_file[sym["fqn"]] = rel_path
         # Compute in-degree threshold: p99 of in-degree distribution, floor of 10.
-        # One-time O(N) cost at index load; cached for O(1) lookup during BFS.
         in_degree_threshold = _compute_in_degree_threshold(fg)
-        # Compute content_hash: SHA-256 of the deterministically serialised raw dict.
-        # Sorted keys + sorted callee lists ensure same raw → same hash.
-        content_hash = _compute_content_hash(raw)
+        # Compute content_hash from the canonical projection of call edges.
+        content_hash = _compute_content_hash(nodes)
         return cls(
             root=root,
             function_graph=fg,
             module_graph=mg,
-            raw=raw,
+            nodes=nodes,
             skeletons=skeletons,
             file_shas=file_shas,
             missed_callers=missed_callers if missed_callers is not None else {},
@@ -221,20 +303,64 @@ class CallGraphIndex:
             _in_degree_threshold=in_degree_threshold,
         )
 
+    @classmethod
+    def from_raw(
+        cls,
+        root: str | Path,
+        raw: dict[str, list[str]],
+        skeletons: dict[str, list[SymbolSummary]] | None = None,
+        file_shas: dict[str, str] | None = None,
+        missed_callers: dict[str, dict[str, int]] | None = None,
+        git_sha: str | None = None,
+    ) -> "CallGraphIndex":
+        """Deprecated — convert legacy ``raw`` shape to ``nodes`` and delegate.
+
+        Retained for transitional callers (notably the test corpus that Child #3
+        of epic #76 will migrate).  New code should call :meth:`from_nodes`
+        directly so non-call edge kinds can be expressed.
+        """
+        nodes = _raw_to_nodes(raw)
+        return cls.from_nodes(
+            root,
+            nodes,
+            skeletons=skeletons,
+            file_shas=file_shas,
+            missed_callers=missed_callers,
+            git_sha=git_sha,
+        )
+
     def save(self, path: str | Path) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Deterministic serialisation: sort node keys, sort kind keys within
+        # each calls/called_by bucket, sort each kind's list.  json.dumps with
+        # sort_keys=True handles the dict layers; we pre-sort the lists.
+        canonical_nodes: dict[str, dict] = {}
+        for sym in sorted(self.nodes):
+            record = self.nodes[sym]
+            calls_buckets = record.get("calls", {}) or {}
+            called_by_buckets = record.get("called_by", {}) or {}
+            canonical_nodes[sym] = {
+                "calls": {
+                    kind: sorted(calls_buckets[kind])
+                    for kind in sorted(calls_buckets)
+                },
+                "called_by": {
+                    kind: sorted(called_by_buckets[kind])
+                    for kind in sorted(called_by_buckets)
+                },
+            }
         payload: dict = {
             "version": INDEX_VERSION,
             "root": str(self.root),
-            "raw": self.raw,
+            "nodes": canonical_nodes,
             "skeletons": self.skeletons,
             "file_shas": self.file_shas if self.file_shas is not None else {},
             "missed_callers": self.missed_callers,
             "git_sha": self.git_sha,
             "content_hash": self.content_hash,
         }
-        path.write_text(json.dumps(payload))
+        path.write_text(json.dumps(payload, sort_keys=True))
         return path
 
     @classmethod
@@ -247,13 +373,22 @@ class CallGraphIndex:
                 f"index schema is v{version}, server requires v{INDEX_VERSION} — "
                 "run 'pyscope-mcp build' to regenerate"
             )
+        # Pre-migration v5 indexes wrote ``raw`` instead of ``nodes``.  Reject
+        # them with the same clear-error contract used for older versions —
+        # there is no migration shim (Corollary 1.3/4.3).
+        if "nodes" not in payload:
+            raise ValueError(
+                f"index schema is v{version} but uses the legacy 'raw' field; "
+                f"server requires v{INDEX_VERSION} with site-keyed 'nodes' — "
+                "run 'pyscope-mcp build' to regenerate"
+            )
         skeletons: dict[str, list[SymbolSummary]] = payload.get("skeletons", {})
         file_shas: dict[str, str] = payload.get("file_shas", {})
         missed_callers: dict[str, dict[str, int]] = payload.get("missed_callers", {})
         git_sha: str | None = payload.get("git_sha")
-        return cls.from_raw(
+        return cls.from_nodes(
             Path(payload["root"]),
-            payload["raw"],
+            payload["nodes"],
             skeletons=skeletons,
             file_shas=file_shas,
             missed_callers=missed_callers,

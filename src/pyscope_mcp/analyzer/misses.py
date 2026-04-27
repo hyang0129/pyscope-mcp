@@ -245,6 +245,13 @@ class MissLog:
         self.accepted_counts: dict[str, int] = {}
         self.builtin_method_modules: Counter[str] = Counter()
 
+        # v5 (epic #76 child #1): dead_keys are callers with no incoming
+        # call edges.  We accumulate the caller / callee universes here so
+        # to_dict() can derive dead_keys without taking the legacy ``raw``
+        # dict as a parameter.
+        self._call_callers: set[str] = set()
+        self._call_callees: set[str] = set()
+
     def record_miss(
         self,
         pattern: str,
@@ -285,7 +292,19 @@ class MissLog:
         if pattern == "builtin_method_call":
             self.builtin_method_modules[file_path] += 1
 
-    def to_dict(self, raw: dict[str, list[str]], known_fqns: set[str]) -> dict:
+    def record_call_edge(self, caller: str, callee: str) -> None:
+        """Track a resolved call edge for dead_keys computation.
+
+        Pipeline calls this for every (caller, callee) pair that lands in the
+        final edge dict.  ``to_dict()`` derives ``dead_keys`` as
+        ``sorted(callers - callees)`` from the accumulated sets — the same
+        semantics the pre-migration ``to_dict(raw, known_fqns)`` produced
+        from the ``raw`` dict.
+        """
+        self._call_callers.add(caller)
+        self._call_callees.add(callee)
+
+    def to_dict(self) -> dict:
         """Assemble the full misses.json structure."""
         total = self.calls_total
         in_pkg = self.calls_resolved_in_package
@@ -302,10 +321,10 @@ class MissLog:
         for pattern in sorted(self.unresolved_calls):
             flat_unresolved.extend(self.unresolved_calls[pattern])
 
-        all_callees: set[str] = set()
-        for callees in raw.values():
-            all_callees.update(callees)
-        dead_keys = sorted(k for k in raw if k not in all_callees)
+        # dead_keys: callers that no edge points to — derived from per-edge
+        # tracking in record_call_edge (pre-migration this was computed
+        # from the ``raw`` dict argument).
+        dead_keys = sorted(self._call_callers - self._call_callees)
 
         # unreferenced_modules: requires module_fqns keyset not threaded here.
         unreferenced_modules: list[str] = []

@@ -124,6 +124,13 @@ def build_with_report(
 ) -> tuple[dict[str, list[str]], dict, dict[str, list[dict]], dict[str, str]]:
     """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict, skeletons, file_shas).
 
+    Returns the legacy caller-keyed ``{caller: [callees]}`` raw shape — the
+    site-keyed v5 inversion happens at the index boundary
+    (``CallGraphIndex.from_nodes`` / ``CallGraphIndex.save``) so this slice
+    (epic #76 child #1) can land without disturbing the analyzer test corpus.
+    Build-pipeline inversion (Child #2/#3) will move the inversion phase here
+    in a follow-up.
+
     ``skeletons`` maps relative file paths to pre-computed symbol lists suitable
     for storage in the index under the ``skeletons`` key (version 3 schema).
 
@@ -217,7 +224,13 @@ def build_with_report(
             _warn(f"error processing {fqn} in pass 2: {type(exc).__name__}: {exc}")
 
     raw = {caller: sorted(callees) for caller, callees in sorted(all_edges.items())}
-    report = miss_log.to_dict(raw, known_fqns)
+    # Track every (caller, callee) pair so MissLog.to_dict() can derive
+    # dead_keys without taking the legacy raw dict as a parameter (epic #76
+    # child #1 — the to_dict signature change).
+    for caller, callees in raw.items():
+        for callee in callees:
+            miss_log.record_call_edge(caller, callee)
+    report = miss_log.to_dict()
     skeletons = _extract_skeletons(root, parsed)
     return raw, report, skeletons, file_shas
 

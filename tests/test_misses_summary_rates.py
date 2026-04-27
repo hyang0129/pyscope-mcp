@@ -33,7 +33,7 @@ def _make_log(
 
 
 def _summary(log: MissLog) -> dict:
-    return log.to_dict(raw={}, known_fqns=set())["summary"]
+    return log.to_dict()["summary"]
 
 
 def test_empty_log_emits_zero_rates() -> None:
