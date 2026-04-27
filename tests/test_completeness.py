@@ -251,17 +251,22 @@ class TestNeighborhoodCompleteness:
         assert result["completeness"] == "partial"
 
     def test_isolated_node_completeness_present(self) -> None:
-        """Isolated-node path (symbol not in graph) still returns completeness."""
+        """Symbol not in graph returns isError:true, error_reason:'fqn_not_in_graph'."""
         idx = _make_idx({}, missed_callers={})
         result = idx.neighborhood("nonexistent.symbol")
-        assert "completeness" in result
-        assert result["completeness"] == "complete"
+        # Post-fix: not-in-graph returns an error dict, not a normal neighborhood result
+        assert result["isError"] is True
+        assert result["error_reason"] == "fqn_not_in_graph"
+        assert result["stale"] is False
 
     def test_isolated_node_partial_when_directly_missed(self) -> None:
+        """Symbol not in graph returns error dict even if it appears in missed_callers."""
         missed = {"nonexistent.symbol": {"bare_name_unresolved": 1}}
         idx = _make_idx({}, missed_callers=missed)
         result = idx.neighborhood("nonexistent.symbol")
-        assert result["completeness"] == "partial"
+        # Post-fix: not-in-graph returns an error dict; missed_callers does not override this
+        assert result["isError"] is True
+        assert result["error_reason"] == "fqn_not_in_graph"
 
     def test_completeness_field_always_present(self) -> None:
         idx = _make_idx(self._RAW, missed_callers={})

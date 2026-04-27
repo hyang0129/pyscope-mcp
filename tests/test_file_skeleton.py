@@ -189,14 +189,15 @@ def test_file_skeleton_returns_symbols() -> None:
 
 
 def test_file_skeleton_unknown_path_returns_error() -> None:
-    """Unknown path returns isError:true AND stale:true with stale_files=[]."""
+    """Unknown path returns isError:true, error_reason:'path_not_in_index', stale:false with no stale_action."""
     idx = _make_index_with_skeletons({"mod.py": []}, file_shas={})
     result = idx.file_skeleton("nonexistent/file.py")
 
     assert result["isError"] is True
-    assert result["stale"] is True
+    assert result["error_reason"] == "path_not_in_index"
+    assert result["stale"] is False
     assert result["stale_files"] == []
-    assert "build" in result["stale_action"].lower()
+    assert "stale_action" not in result
     assert "staleness_info" not in result
 
 
@@ -397,13 +398,15 @@ def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
 
 
 def test_file_skeleton_stale_file_not_in_index(tmp_path: Path) -> None:
-    """Scenario D: v3 index, path not in skeletons → isError: true, stale: true, stale_files=[]."""
+    """Scenario D: v3 index, path not in skeletons → isError: true, error_reason: 'path_not_in_index', stale: false."""
     idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={}, file_shas={})
 
     result = idx.file_skeleton("new_mod.py")
     assert result["isError"] is True
-    assert result["stale"] is True
+    assert result["error_reason"] == "path_not_in_index"
+    assert result["stale"] is False
     assert result["stale_files"] == []
+    assert "stale_action" not in result
     assert "staleness_info" not in result
 
 
