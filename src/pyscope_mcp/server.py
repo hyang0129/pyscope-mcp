@@ -64,14 +64,30 @@ _SERVER = RpcServer(
     name="pyscope-mcp",
     version=__version__,
     instructions=(
-        "Query the prebuilt Python call-graph index. "
-        "Use stats to check graph size, callers_of/callees_of for function-level "
-        "traversal, module_callers/module_callees for module-level traversal, "
-        "search for symbol lookup, file_skeleton for a file's symbol list, "
-        "neighborhood for a bounded bidirectional subgraph around a symbol, "
-        "build to rebuild the index from source (triggers pyscope-mcp build as a "
-        "subprocess and reloads the in-process index), and reload to re-read an "
-        "already-built index from disk."
+        "Python call-graph index for the target repo. Reach for these tools BEFORE "
+        "grep when the question involves a named Python symbol.\n\n"
+        "Trigger on task intake (not after deciding to grep):\n"
+        "- Refactoring or renaming a symbol → `search` + `callers_of` to scope blast "
+        "radius before reading any file.\n"
+        "- Deleting code → `callers_of` to confirm it is actually dead.\n"
+        "- Implementing something new → `search` first to check it does not already "
+        "exist (avoid reimplementing).\n"
+        "- Reading unfamiliar code → `file_skeleton` for the symbol list, then "
+        "`neighborhood` to orient in the local subgraph before diving in.\n"
+        "- Moving or splitting a module → `module_callers` to find all importers "
+        "upfront.\n\n"
+        "Grep stays correct for: literal strings, comments, config values, `import` "
+        "lines, and `except FooError:` clauses — things the call graph does not "
+        "capture.\n\n"
+        "Tool inventory: `stats` (graph size), `search` (symbol lookup), "
+        "`callers_of` / `callees_of` (function-level traversal), `module_callers` / "
+        "`module_callees` (module-level), `file_skeleton` (file's symbol list), "
+        "`neighborhood` (bounded bidirectional subgraph), `build` (rebuild + reload "
+        "in one step), `reload` (re-read an existing index from disk).\n\n"
+        "Known limit: dynamic dispatch, decorator chains, and string-keyed registries "
+        "can produce missing edges. Absence of an edge is weak evidence. Responses "
+        "flagged with `completeness: \"partial\"` should be cross-checked with grep "
+        "for imports/catches."
     ),
 )
 
