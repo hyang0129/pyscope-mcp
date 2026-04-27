@@ -31,6 +31,7 @@ from pyscope_mcp._rpc import (
     RpcServer,
 )
 from pyscope_mcp.graph import CallGraphIndex
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ def tmp_index(tmp_path: Path) -> Path:
         "pkg.mod.bar": [],
         "pkg.other.baz": ["pkg.mod.foo"],
     }
-    idx = CallGraphIndex.from_raw(tmp_path, raw)
+    idx = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw))
     idx_path = tmp_path / "index.json"
     idx.save(idx_path)
     return idx_path
@@ -1079,7 +1080,7 @@ async def test_reload_reflects_disk_change(server: RpcServer, tmp_index: Path):
         "a.b.f": [],
         "x.y.z": ["a.b.c"],
     }
-    new_idx = CallGraphIndex.from_raw(tmp_index.parent, new_raw)
+    new_idx = CallGraphIndex.from_nodes(tmp_index.parent, make_nodes(new_raw))
     new_idx.save(tmp_index)
 
     # Call reload then stats; must reflect the new counts.

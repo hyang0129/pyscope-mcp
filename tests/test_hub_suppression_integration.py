@@ -72,8 +72,8 @@ def test_analyzer_resolves_hub_callers(hub_idx: CallGraphIndex) -> None:
     """Analyzer must produce >= N_EXTRA_CALLERS+1 in-edges for shared_helper."""
     in_degree = sum(
         1
-        for callees in hub_idx.raw.values()
-        if "hub_fixture.utils.shared_helper" in callees
+        for node in hub_idx.nodes.values()
+        if "hub_fixture.utils.shared_helper" in node.get("calls", {}).get("call", [])
     )
     assert in_degree >= _N_EXTRA_CALLERS + 1, (
         f"Expected >= {_N_EXTRA_CALLERS + 1} callers of shared_helper, "
