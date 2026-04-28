@@ -94,13 +94,11 @@ If you are an agent setting up `pyscope-mcp` in a new repo, follow these steps:
 
 4. **Verify the server loaded**
 
-   After restarting Claude Code (or reloading the MCP server), run:
+   After restarting Claude Code (or reloading the MCP server), ask Claude:
 
-   ```bash
-   pyscope-mcp stats --root /abs/path/to/repo
-   ```
+   > Call the `stats` tool on the pyscope-mcp server.
 
-   You should see node and edge counts printed. If the output is non-empty the index loaded correctly and the MCP tools are ready to use.
+   You should see node and edge counts in the response. If the output is non-empty the index loaded correctly and the MCP tools are ready to use.
 
 ## Query logging (opt-in)
 
