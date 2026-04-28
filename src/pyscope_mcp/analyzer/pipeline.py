@@ -124,6 +124,13 @@ def build_with_report(
 ) -> tuple[dict[str, list[str]], dict, dict[str, list[dict]], dict[str, str]]:
     """Pass 1 + pass 2 with MissLog. Returns (raw_edges, miss_report_dict, skeletons, file_shas).
 
+    Returns the legacy caller-keyed ``{caller: [callees]}`` raw shape — the
+    site-keyed v5 inversion happens at the index boundary
+    (``CallGraphIndex.from_nodes`` / ``CallGraphIndex.save``) so this slice
+    (epic #76 child #1) can land without disturbing the analyzer test corpus.
+    Build-pipeline inversion (Child #2/#3) will move the inversion phase here
+    in a follow-up.
+
     ``skeletons`` maps relative file paths to pre-computed symbol lists suitable
     for storage in the index under the ``skeletons`` key (version 3 schema).
 
@@ -193,8 +200,12 @@ def build_with_report(
 
     miss_log.files_parsed = len(parsed)
 
-    # Pass 2: extract edges.
+    # Pass 2: extract edges.  We collect both the legacy call-only adjacency
+    # (used by the back-compat ``raw`` return value) AND the kind-tagged map
+    # produced by the new visitors so the same pass feeds both
+    # ``build_with_report`` (legacy) and ``build_nodes_with_report`` (new).
     all_edges: dict[str, set[str]] = {}
+    all_kind_edges: dict[str, dict[str, set[str]]] = {}
     for fqn, tree, path, import_table in parsed:
         try:
             visitor = EdgeVisitor(
@@ -213,13 +224,106 @@ def build_with_report(
             visitor.visit(tree)
             for caller, callees in visitor.edges.items():
                 all_edges.setdefault(caller, set()).update(callees)
+            for caller, kind_buckets in visitor.kind_edges.items():
+                merged = all_kind_edges.setdefault(caller, {})
+                for kind, callees in kind_buckets.items():
+                    merged.setdefault(kind, set()).update(callees)
         except Exception as exc:  # noqa: BLE001
             _warn(f"error processing {fqn} in pass 2: {type(exc).__name__}: {exc}")
 
     raw = {caller: sorted(callees) for caller, callees in sorted(all_edges.items())}
-    report = miss_log.to_dict(raw, known_fqns)
+    # Track every (caller, callee) pair so MissLog.to_dict() can derive
+    # dead_keys without taking the legacy raw dict as a parameter (epic #76
+    # child #1 — the to_dict signature change).
+    for caller, callees in raw.items():
+        for callee in callees:
+            miss_log.record_call_edge(caller, callee)
+    report = miss_log.to_dict()
     skeletons = _extract_skeletons(root, parsed)
+    # Stash the kind-tagged edges on a thread-local stash keyed by the report
+    # id — keeps the misses-sidecar JSON shape stable while letting
+    # ``build_nodes_with_report`` recover the kind-tagged data without
+    # re-running pass 2.
+    _last_kind_edges[id(report)] = all_kind_edges
     return raw, report, skeletons, file_shas
+
+
+# Internal stash so ``build_nodes_with_report`` can recover the kind-tagged
+# edges from the most recent ``build_with_report`` call without polluting the
+# misses-sidecar JSON contract.  Keyed by ``id(report)`` so concurrent calls
+# don't collide.  Entries are short-lived — drained immediately by the
+# wrapper in ``build_nodes_with_report``.
+_last_kind_edges: dict[int, dict[str, dict[str, set[str]]]] = {}
+
+
+def _invert_to_nodes(
+    kind_edges: dict[str, dict[str, set[str]]],
+) -> dict[str, dict[str, dict[str, list[str]]]]:
+    """Build-time inversion: assemble per-symbol site-keyed records.
+
+    Input is the forward kind-tagged adjacency emitted by the analyzer:
+    ``{caller: {kind: {callee, ...}}}``.  Output is the site-keyed shape the
+    index serialises:
+    ``{symbol: {"calls": {kind: [callees]}, "called_by": {kind: [callers]}}}``.
+
+    Determinism (Corollary 3.2): node keys are inserted in sorted order, kind
+    keys per bucket are inserted in sorted order, and per-kind callee/caller
+    lists are sorted before insertion — so the same forward map produces the
+    same JSON bytes regardless of analyzer iteration order.
+    """
+    forward: dict[str, dict[str, set[str]]] = {}
+    reverse: dict[str, dict[str, set[str]]] = {}
+    all_symbols: set[str] = set()
+
+    for caller, buckets in kind_edges.items():
+        all_symbols.add(caller)
+        for kind, callees in buckets.items():
+            for callee in callees:
+                all_symbols.add(callee)
+                forward.setdefault(caller, {}).setdefault(kind, set()).add(callee)
+                reverse.setdefault(callee, {}).setdefault(kind, set()).add(caller)
+
+    nodes: dict[str, dict[str, dict[str, list[str]]]] = {}
+    for sym in sorted(all_symbols):
+        record: dict[str, dict[str, list[str]]] = {"calls": {}, "called_by": {}}
+        f_buckets = forward.get(sym, {})
+        for kind in sorted(f_buckets):
+            record["calls"][kind] = sorted(f_buckets[kind])
+        r_buckets = reverse.get(sym, {})
+        for kind in sorted(r_buckets):
+            record["called_by"][kind] = sorted(r_buckets[kind])
+        nodes[sym] = record
+    return nodes
+
+
+def build_nodes_with_report(
+    root: str | Path,
+    package: str,
+) -> tuple[dict[str, dict], dict, dict[str, list[dict]], dict[str, str]]:
+    """Pass 1 + pass 2 + build-time inversion.  Returns ``(nodes, report,
+    skeletons, file_shas)`` where *nodes* is the site-keyed shape Child #1
+    landed (``CallGraphIndex.from_nodes``).
+
+    This is the new analyzer entry point introduced by epic #76 child #2
+    (issue #85).  ``build_with_report`` continues to return the legacy
+    call-only ``raw`` shape so the existing test corpus and downstream
+    callers keep working until Child #3 migrates the fixtures.
+
+    The build-time inversion phase here populates ``called_by`` per-symbol
+    deterministically (sorted callee/caller lists, sorted kind keys), so the
+    on-disk index is byte-identical for the same source tree.
+    """
+    raw, report, skeletons, file_shas = build_with_report(root, package)
+    kind_edges = _last_kind_edges.pop(id(report), None)
+    if kind_edges is None:
+        # No kind-tagged stash available (defensive fallback); derive
+        # call-only kind_edges from raw so we still produce a valid nodes
+        # shape — non-call kinds will be empty.
+        kind_edges = {}
+        for caller, callees in raw.items():
+            kind_edges[caller] = {"call": set(callees)}
+    nodes = _invert_to_nodes(kind_edges)
+    return nodes, report, skeletons, file_shas
 
 
 def build_raw(root: str | Path, package: str) -> dict[str, list[str]]:

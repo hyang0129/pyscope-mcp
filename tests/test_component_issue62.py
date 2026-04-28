@@ -27,6 +27,7 @@ from typing import Any
 import pytest
 
 from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +45,7 @@ def _make_minimal_raw() -> dict[str, list[str]]:
 def _make_index(tmp_path: Path, raw: dict[str, list[str]] | None = None) -> CallGraphIndex:
     if raw is None:
         raw = _make_minimal_raw()
-    return CallGraphIndex.from_raw(str(tmp_path), raw)
+    return CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ def test_load_accepts_v5_index(tmp_path: Path) -> None:
 def test_from_raw_populates_content_hash(tmp_path: Path) -> None:
     """content_hash is computed and non-empty after from_raw()."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     assert isinstance(idx.content_hash, str)
     assert len(idx.content_hash) == 64, "SHA-256 hex digest must be 64 chars"
 
@@ -108,8 +109,8 @@ def test_from_raw_populates_content_hash(tmp_path: Path) -> None:
 def test_content_hash_is_deterministic(tmp_path: Path) -> None:
     """Same raw dict always produces the same content_hash."""
     raw = _make_minimal_raw()
-    idx1 = CallGraphIndex.from_raw(str(tmp_path), raw)
-    idx2 = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx1 = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
+    idx2 = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     assert idx1.content_hash == idx2.content_hash
 
 
@@ -117,8 +118,8 @@ def test_content_hash_changes_with_raw(tmp_path: Path) -> None:
     """Different raw dicts produce different content_hashes."""
     raw_a = {"pkg.a": ["pkg.b"], "pkg.b": []}
     raw_b = {"pkg.a": ["pkg.c"], "pkg.c": []}
-    idx_a = CallGraphIndex.from_raw(str(tmp_path), raw_a)
-    idx_b = CallGraphIndex.from_raw(str(tmp_path), raw_b)
+    idx_a = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw_a))
+    idx_b = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw_b))
     assert idx_a.content_hash != idx_b.content_hash
 
 
@@ -131,7 +132,7 @@ def test_git_sha_defaults_to_none(tmp_path: Path) -> None:
 def test_git_sha_roundtrips_through_save_load(tmp_path: Path) -> None:
     """git_sha is persisted on save and restored on load."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha="abc123def456")
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha="abc123def456")
     saved = idx.save(tmp_path / "index.json")
     loaded = CallGraphIndex.load(saved)
     assert loaded.git_sha == "abc123def456"
@@ -140,7 +141,7 @@ def test_git_sha_roundtrips_through_save_load(tmp_path: Path) -> None:
 def test_git_sha_none_roundtrips_through_save_load(tmp_path: Path) -> None:
     """git_sha=None round-trips correctly (persisted as null, restored as None)."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha=None)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=None)
     saved = idx.save(tmp_path / "index.json")
     loaded = CallGraphIndex.load(saved)
     assert loaded.git_sha is None
@@ -149,7 +150,7 @@ def test_git_sha_none_roundtrips_through_save_load(tmp_path: Path) -> None:
 def test_content_hash_roundtrips_through_save_load(tmp_path: Path) -> None:
     """content_hash is persisted on save and identical after load."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     saved = idx.save(tmp_path / "index.json")
     loaded = CallGraphIndex.load(saved)
     assert loaded.content_hash == idx.content_hash
@@ -159,7 +160,7 @@ def test_content_hash_roundtrips_through_save_load(tmp_path: Path) -> None:
 def test_saved_payload_has_git_sha_and_content_hash_keys(tmp_path: Path) -> None:
     """Serialised index JSON must contain git_sha and content_hash keys."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw, git_sha="deadbeef")
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha="deadbeef")
     saved = idx.save(tmp_path / "index.json")
     payload = json.loads(saved.read_text())
     assert "git_sha" in payload, "git_sha must be present in saved index"
@@ -175,7 +176,7 @@ def test_saved_payload_has_git_sha_and_content_hash_keys(tmp_path: Path) -> None
 def test_callers_of_has_dropped_field(tmp_path: Path) -> None:
     """callers_of result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     result = idx.callers_of("pkg.mod.bar", depth=1)
     assert "dropped" in result, "callers_of must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
@@ -185,7 +186,7 @@ def test_callers_of_has_dropped_field(tmp_path: Path) -> None:
 def test_callees_of_has_dropped_field(tmp_path: Path) -> None:
     """callees_of result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     result = idx.callees_of("pkg.mod.foo", depth=1)
     assert "dropped" in result, "callees_of must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
@@ -195,7 +196,7 @@ def test_callees_of_has_dropped_field(tmp_path: Path) -> None:
 def test_module_callers_has_dropped_field(tmp_path: Path) -> None:
     """module_callers result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     result = idx.module_callers("pkg.mod", depth=1)
     assert "dropped" in result, "module_callers must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
@@ -205,7 +206,7 @@ def test_module_callers_has_dropped_field(tmp_path: Path) -> None:
 def test_module_callees_has_dropped_field(tmp_path: Path) -> None:
     """module_callees result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     result = idx.module_callees("pkg.other", depth=1)
     assert "dropped" in result, "module_callees must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
@@ -271,7 +272,7 @@ async def _run_server(server, lines: list[bytes]) -> list[dict]:
 def _server_with_index(tmp_path: Path):
     """A server fixture wired to a fresh minimal index."""
     raw = _make_minimal_raw()
-    idx = CallGraphIndex.from_raw(str(tmp_path), raw)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
     idx_path = tmp_path / "index.json"
     idx.save(idx_path)
 
@@ -407,8 +408,6 @@ def test_hub_suppression_index_accepts_git_sha(tmp_path: Path) -> None:
         "pkg.app.entry_point": ["pkg.utils.shared_helper"],
     }
     # Must not raise
-    idx = CallGraphIndex.from_raw(
-        str(tmp_path), raw, git_sha="cafebabe01234567"
-    )
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha="cafebabe01234567")
     assert idx.git_sha == "cafebabe01234567"
     assert idx.content_hash  # populated, non-empty

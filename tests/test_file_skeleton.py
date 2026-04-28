@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex
+from conftest import make_nodes
 from pyscope_mcp.analyzer.pipeline import _extract_skeletons, _first_def_line
 
 
@@ -34,7 +35,7 @@ def _make_index_with_skeletons(skeletons: dict, file_shas: dict | None = None) -
     Pass ``file_shas=None`` (the default) to simulate a pre-v3 index.
     Pass ``file_shas={}`` (or a populated dict) to simulate a v3 index.
     """
-    return CallGraphIndex.from_raw("/tmp/test", {}, skeletons=skeletons, file_shas=file_shas)
+    return CallGraphIndex.from_nodes("/tmp/test", make_nodes({}), skeletons=skeletons, file_shas=file_shas)
 
 
 def _parse(source: str) -> ast.Module:
@@ -254,7 +255,7 @@ def test_save_load_roundtrip_with_skeletons(tmp_path: Path) -> None:
         _make_symbol("pkg.mod.MyClass", "class", 1),
         _make_symbol("pkg.mod.MyClass.run", "method", 5),
     ]
-    idx = CallGraphIndex.from_raw("/tmp/test", {"pkg.mod.MyClass.run": []}, skeletons={"mod.py": symbols})
+    idx = CallGraphIndex.from_nodes("/tmp/test", make_nodes({"pkg.mod.MyClass.run": []}), skeletons={"mod.py": symbols})
     out = tmp_path / "index.json"
     idx.save(out)
 
@@ -269,7 +270,7 @@ def test_save_load_roundtrip_with_skeletons(tmp_path: Path) -> None:
 def test_save_version_is_current(tmp_path: Path) -> None:
     """Saved index must have the current INDEX_VERSION."""
     from pyscope_mcp.graph import INDEX_VERSION
-    idx = CallGraphIndex.from_raw("/tmp/test", {})
+    idx = CallGraphIndex.from_nodes("/tmp/test", make_nodes({}))
     out = tmp_path / "index.json"
     idx.save(out)
     payload = _json.loads(out.read_text())
@@ -279,7 +280,7 @@ def test_save_version_is_current(tmp_path: Path) -> None:
 def test_save_includes_file_shas(tmp_path: Path) -> None:
     """Saved index includes file_shas key."""
     shas = {"mod.py": "abc123"}
-    idx = CallGraphIndex.from_raw("/tmp/test", {}, file_shas=shas)
+    idx = CallGraphIndex.from_nodes("/tmp/test", make_nodes({}), file_shas=shas)
     out = tmp_path / "index.json"
     idx.save(out)
     payload = _json.loads(out.read_text())
@@ -290,7 +291,7 @@ def test_save_includes_file_shas(tmp_path: Path) -> None:
 def test_save_load_roundtrip_file_shas(tmp_path: Path) -> None:
     """file_shas survive save() → load() intact."""
     shas = {"a.py": "deadbeef", "b.py": "cafebabe"}
-    idx = CallGraphIndex.from_raw("/tmp/test", {}, file_shas=shas)
+    idx = CallGraphIndex.from_nodes("/tmp/test", make_nodes({}), file_shas=shas)
     out = tmp_path / "index.json"
     idx.save(out)
     loaded = CallGraphIndex.load(out)
@@ -353,7 +354,7 @@ def test_file_skeleton_stale_sha_match(tmp_path: Path) -> None:
 
     symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
     shas = {"mod.py": _sha256(content)}
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={"mod.py": symbols}, file_shas=shas)
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is False
@@ -371,7 +372,7 @@ def test_file_skeleton_stale_sha_mismatch(tmp_path: Path) -> None:
 
     symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
     shas = {"mod.py": _sha256(original)}  # stored hash is of original content
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={"mod.py": symbols}, file_shas=shas)
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True
@@ -387,7 +388,7 @@ def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
     symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
     shas = {"mod.py": "somehex"}
     # Don't create the file on disk
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=shas)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={"mod.py": symbols}, file_shas=shas)
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True
@@ -399,7 +400,7 @@ def test_file_skeleton_stale_file_not_found(tmp_path: Path) -> None:
 
 def test_file_skeleton_stale_file_not_in_index(tmp_path: Path) -> None:
     """Scenario D: v3 index, path not in skeletons → isError: true, error_reason: 'path_not_in_index', stale: false."""
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={}, file_shas={})
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={}, file_shas={})
 
     result = idx.file_skeleton("new_mod.py")
     assert result["isError"] is True
@@ -414,7 +415,7 @@ def test_file_skeleton_stale_pre_v3_index(tmp_path: Path) -> None:
     """Scenario E: pre-v3 index (file_shas=None) → stale: true, index_format_incompatible."""
     symbols = [_make_symbol("pkg.mod.foo", "function", 1)]
     # file_shas=None simulates loading a v1 or v2 index
-    idx = CallGraphIndex.from_raw(str(tmp_path), {}, skeletons={"mod.py": symbols}, file_shas=None)
+    idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes({}), skeletons={"mod.py": symbols}, file_shas=None)
 
     result = idx.file_skeleton("mod.py")
     assert result["stale"] is True

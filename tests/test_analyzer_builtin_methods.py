@@ -137,7 +137,7 @@ def test_to_dict_rollup_top5() -> None:
     for _ in range(6):
         log.record_accepted("builtin_method_call", "f.py")
 
-    report = log.to_dict({}, set())
+    report = log.to_dict()
     summary = report["summary"]
 
     assert summary["calls_accepted"] == 21

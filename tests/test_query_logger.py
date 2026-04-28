@@ -27,6 +27,7 @@ import pytest
 
 from pyscope_mcp._rpc import RpcServer
 from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
+from conftest import make_nodes
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +104,7 @@ def raw_graph() -> dict[str, list[str]]:
 @pytest.fixture()
 def tmp_index(tmp_path: Path, raw_graph: dict) -> Path:
     """Minimal v5 index on disk."""
-    idx = CallGraphIndex.from_raw(tmp_path, raw_graph)
+    idx = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_graph))
     idx_path = tmp_path / ".pyscope-mcp" / "index.json"
     idx.save(idx_path)
     return idx_path
@@ -235,7 +236,7 @@ def hub_index(tmp_path: Path) -> Path:
         raw[f"pkg.agent.worker_{i}.run"] = ["pkg.util.common"]
     # Add the target symbol
     raw["pkg.mod.target"] = ["pkg.util.common", "pkg.agent.worker_0.run"]
-    idx = CallGraphIndex.from_raw(tmp_path, raw)
+    idx = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw))
     idx_path = tmp_path / ".pyscope-mcp" / "index.json"
     idx.save(idx_path)
     return idx_path
@@ -375,8 +376,8 @@ async def test_s6_reload_updates_index_identity(tmp_path: Path):
     # Build two different indexes.
     raw_a = {"pkg.a.foo": ["pkg.a.bar"], "pkg.a.bar": []}
     raw_b = {"pkg.b.hello": ["pkg.b.world"], "pkg.b.world": []}
-    idx_a = CallGraphIndex.from_raw(tmp_path, raw_a)
-    idx_b = CallGraphIndex.from_raw(tmp_path, raw_b)
+    idx_a = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_a))
+    idx_b = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_b))
     idx_path = tmp_path / ".pyscope-mcp" / "index.json"
     idx_a.save(idx_path)
 
@@ -464,7 +465,7 @@ def test_s8_v5_roundtrip_git_sha_content_hash(tmp_path: Path):
     raw = {"pkg.mod.foo": ["pkg.mod.bar"], "pkg.mod.bar": []}
     fake_sha = "a1b2c3d4e5f6789012345678901234567890abcd"
 
-    idx = CallGraphIndex.from_raw(tmp_path, raw, git_sha=fake_sha)
+    idx = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw), git_sha=fake_sha)
     assert idx.git_sha == fake_sha
     assert len(idx.content_hash) == 64  # SHA-256 hex
 
@@ -484,8 +485,8 @@ def test_s8_v5_roundtrip_git_sha_content_hash(tmp_path: Path):
 def test_s8_content_hash_is_deterministic(tmp_path: Path):
     """S8: two builds against the same raw dict produce the same content_hash."""
     raw = {"pkg.mod.foo": ["pkg.mod.bar", "pkg.mod.baz"], "pkg.mod.bar": [], "pkg.mod.baz": []}
-    idx1 = CallGraphIndex.from_raw(tmp_path, raw)
-    idx2 = CallGraphIndex.from_raw(tmp_path, raw)
+    idx1 = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw))
+    idx2 = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw))
     assert idx1.content_hash == idx2.content_hash
     assert len(idx1.content_hash) == 64
 
@@ -493,7 +494,7 @@ def test_s8_content_hash_is_deterministic(tmp_path: Path):
 def test_s8_non_git_build_produces_none_git_sha(tmp_path: Path):
     """S8: building without a git_sha produces git_sha=None; load/serve still work."""
     raw = {"pkg.mod.foo": []}
-    idx = CallGraphIndex.from_raw(tmp_path, raw, git_sha=None)
+    idx = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw), git_sha=None)
     assert idx.git_sha is None
     idx_path = tmp_path / "index.json"
     idx.save(idx_path)
@@ -526,6 +527,6 @@ def test_s8_different_raw_produces_different_hash(tmp_path: Path):
     """S8: different raw dicts produce different content hashes."""
     raw_a = {"pkg.a.foo": ["pkg.a.bar"], "pkg.a.bar": []}
     raw_b = {"pkg.b.hello": ["pkg.b.world"], "pkg.b.world": []}
-    idx_a = CallGraphIndex.from_raw(tmp_path, raw_a)
-    idx_b = CallGraphIndex.from_raw(tmp_path, raw_b)
+    idx_a = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_a))
+    idx_b = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_b))
     assert idx_a.content_hash != idx_b.content_hash

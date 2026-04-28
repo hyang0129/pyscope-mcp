@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 
-from .discovery import SENTINEL_BUILTIN_TYPES
+from .discovery import SENTINEL_BUILTIN_TYPES, resolve_annotation
 from .misses import (
     ACCEPTED_PATTERNS,
     BUILTIN_COLLECTION_METHODS,
@@ -42,6 +42,24 @@ _SENTINEL_ACCEPTED: dict[str, tuple[str, frozenset[str]]] = {
 assert set(_SENTINEL_ACCEPTED) == SENTINEL_BUILTIN_TYPES, (
     "visitor._SENTINEL_ACCEPTED keys diverged from discovery.SENTINEL_BUILTIN_TYPES"
 )
+
+
+def _warn_kind_failure(kind: str, file_path: str, exc: BaseException) -> None:
+    """Emit a per-kind visitor failure warning to stderr.
+
+    Used by the new edge-kind visitors (import / except / annotation /
+    isinstance) under their per-method ``try/except`` so a failure in one kind
+    does not poison other kinds' edges from the same file (Corollary 1.2/4.2
+    extended per-kind, per epic #76).
+    """
+    import sys
+
+    where = file_path or "<unknown>"
+    print(
+        f"[pyscope-mcp] {kind}-edge visitor failed in {where}: "
+        f"{type(exc).__name__}: {exc}",
+        file=sys.stderr,
+    )
 
 
 class EdgeVisitor(ast.NodeVisitor):
@@ -82,7 +100,12 @@ class EdgeVisitor(ast.NodeVisitor):
         self._miss_log = miss_log
         self._scope_stack: list[str] = []
         self._func_node_stack: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
-        self.edges: dict[str, set[str]] = {}
+        # Kind-tagged edges: caller_fqn -> kind -> set[callee_fqn].
+        # Edge kinds: "call", "import", "except", "annotation", "isinstance".
+        # The legacy ``self.edges`` view (call edges only) remains available via
+        # the property below so call-edge consumers (pipeline aggregation,
+        # legacy tests) continue to work unmodified.
+        self.kind_edges: dict[str, dict[str, set[str]]] = {}
 
     # ------------------------------------------------------------------
     # Scope helpers
@@ -317,9 +340,39 @@ class EdgeVisitor(ast.NodeVisitor):
     # Edge emission
     # ------------------------------------------------------------------
 
-    def _emit(self, callee_fqn: str) -> None:
-        caller = self._current_caller()
-        self.edges.setdefault(caller, set()).add(callee_fqn)
+    def _emit(self, callee_fqn: str, kind: str = "call", caller: str | None = None) -> None:
+        """Record an edge from *caller* (or the current caller) to *callee_fqn*
+        under the given *kind* bucket.
+
+        ``kind`` is one of the supported edge-kind strings — ``call``, ``import``,
+        ``except``, ``annotation``, ``isinstance``.  Adding a new kind is a
+        single-line additive change to the call site that emits it; the
+        visitor stores all kinds in the same per-caller dict.
+
+        ``caller`` overrides the current scope-derived caller when supplied,
+        which lets module-level emitters (imports) attribute edges to the
+        module FQN regardless of how the AST walk's scope stack happens to
+        be configured at the visit site.
+        """
+        if caller is None:
+            caller = self._current_caller()
+        bucket = self.kind_edges.setdefault(caller, {})
+        bucket.setdefault(kind, set()).add(callee_fqn)
+
+    @property
+    def edges(self) -> dict[str, set[str]]:
+        """Backward-compatible view: caller -> set[callee] for ``call`` edges only.
+
+        The legacy ``self.edges`` shape (flat call-only) is preserved as a
+        derived view over ``self.kind_edges``.  Pipeline aggregation and the
+        existing test corpus consume this view; non-call edge kinds are
+        accessible directly via ``self.kind_edges``.
+        """
+        return {
+            caller: set(buckets["call"])
+            for caller, buckets in self.kind_edges.items()
+            if "call" in buckets and buckets["call"]
+        }
 
     def _try_accept_self_attr_sentinel(self, node: ast.Call) -> str | None:
         """For ``self.<attr>.<method>(...)`` calls where ``<attr>`` is typed as a
@@ -509,6 +562,9 @@ class EdgeVisitor(ast.NodeVisitor):
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._scope_stack.append(node.name)
         self._func_node_stack.append(node)
+        # Annotation edges from this function's signature are emitted with the
+        # function's own FQN as the caller — push the scope first.
+        self._scan_function_annotations(node)
         self.generic_visit(node)
         self._func_node_stack.pop()
         self._scope_stack.pop()
@@ -516,6 +572,7 @@ class EdgeVisitor(ast.NodeVisitor):
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
         self._scope_stack.append(node.name)
         self._func_node_stack.append(node)
+        self._scan_function_annotations(node)
         self.generic_visit(node)
         self._func_node_stack.pop()
         self._scope_stack.pop()
@@ -525,7 +582,225 @@ class EdgeVisitor(ast.NodeVisitor):
         self.generic_visit(node)
         self._scope_stack.pop()
 
+    # ------------------------------------------------------------------
+    # New edge-kind visitors (epic #76 child #2 / issue #85)
+    #
+    # Per-kind error isolation: each new visitor wraps its body in
+    # try/except so a failure in (say) annotation resolution does not drop
+    # call/import/except edges from the same file.  The outer per-file guard
+    # in pipeline.py remains as the safety net for ``visit_Call`` itself
+    # (which is hot and has its own intricate resolution path).
+    # ------------------------------------------------------------------
+
+    def visit_Import(self, node: ast.Import) -> None:
+        try:
+            module_caller = self._ctx.module_fqn
+            for alias in node.names:
+                # ``import foo.bar`` → emit an import edge to ``foo.bar``.
+                # ``import foo.bar as fb`` → still emit ``foo.bar`` (the imported
+                # symbol's canonical FQN, not the local rebinding).
+                target = alias.name
+                if target:
+                    self._emit(target, kind="import", caller=module_caller)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("import", self._file_path, exc)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        try:
+            module_caller = self._ctx.module_fqn
+            level = node.level or 0
+            if level > 0:
+                # Relative import — resolve via import_table: each alias.local
+                # was registered there by build_import_table.
+                for alias in node.names:
+                    local = alias.asname if alias.asname else alias.name
+                    target = self._ctx.import_table.get(local)
+                    if target:
+                        self._emit(target, kind="import", caller=module_caller)
+            else:
+                base = node.module
+                if base:
+                    for alias in node.names:
+                        # ``from foo.bar import *`` — alias.name == "*".  Skip:
+                        # we don't have visibility into the wildcard expansion
+                        # at the visitor layer.  (Wildcard imports are #74.)
+                        if alias.name == "*":
+                            continue
+                        target = f"{base}.{alias.name}"
+                        self._emit(target, kind="import", caller=module_caller)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("import", self._file_path, exc)
+        self.generic_visit(node)
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        try:
+            exc_type = node.type
+            if exc_type is not None:
+                # ``except (A, B):`` — tuple of exception types.
+                if isinstance(exc_type, ast.Tuple):
+                    for elt in exc_type.elts:
+                        self._emit_except_target(elt)
+                else:
+                    self._emit_except_target(exc_type)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("except", self._file_path, exc)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        try:
+            self._scan_annotation(node.annotation)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("annotation", self._file_path, exc)
+        self.generic_visit(node)
+
+    # ---- annotation helpers ----
+
+    def _scan_function_annotations(
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> None:
+        """Emit ``annotation`` edges from this function/method to every type
+        named in its argument and return annotations.
+
+        Wrapped in its own try/except for per-kind isolation.
+        """
+        try:
+            args = node.args
+            for arg in (
+                *args.args,
+                *args.kwonlyargs,
+                *args.posonlyargs,
+            ):
+                if arg.annotation is not None:
+                    self._scan_annotation(arg.annotation)
+            if args.vararg is not None and args.vararg.annotation is not None:
+                self._scan_annotation(args.vararg.annotation)
+            if args.kwarg is not None and args.kwarg.annotation is not None:
+                self._scan_annotation(args.kwarg.annotation)
+            if node.returns is not None:
+                self._scan_annotation(node.returns)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("annotation", self._file_path, exc)
+
+    def _scan_annotation(self, annotation: ast.expr) -> None:
+        """Resolve *annotation* to in-package type FQNs and emit annotation
+        edges.  Recurses into ``Subscript`` (``Optional[X]``, ``list[X]``,
+        ``Union[A, B]``) and ``BinOp`` (``A | B`` PEP 604 unions).  Bare
+        ``ast.Name`` / ``ast.Attribute`` chains are resolved via
+        ``resolve_annotation`` (the discovery helper, exposed for reuse).
+        """
+        # Subscript: peel off the subscript and recurse into both value and slice.
+        if isinstance(annotation, ast.Subscript):
+            self._scan_annotation(annotation.value)
+            slice_node = annotation.slice
+            # Tuple slice: ``Union[A, B]`` -> Tuple(A, B); ``Dict[K, V]`` similar.
+            if isinstance(slice_node, ast.Tuple):
+                for elt in slice_node.elts:
+                    self._scan_annotation(elt)
+            else:
+                self._scan_annotation(slice_node)
+            return
+        # PEP 604 unions: ``A | B`` is BinOp(BitOr).  Recurse on both sides.
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            self._scan_annotation(annotation.left)
+            self._scan_annotation(annotation.right)
+            return
+        # Bare names and attribute chains: resolve via the shared helper.
+        if isinstance(annotation, (ast.Name, ast.Attribute)):
+            resolved = resolve_annotation(
+                annotation,
+                self._ctx.module_fqn,
+                self._ctx.import_table,
+                self._ctx.known_fqns,
+            )
+            if resolved is not None:
+                # Emit from the innermost enclosing function; module scope falls
+                # back to the module FQN via _current_caller().
+                func_fqn = self._current_func_fqn()
+                caller = func_fqn if func_fqn is not None else self._current_caller()
+                self._emit(resolved, kind="annotation", caller=caller)
+
+    def _emit_except_target(self, type_node: ast.expr) -> None:
+        """Resolve an ``except T:`` clause's type expression to an in-package
+        FQN and emit an ``except`` edge.  Falls back to ``import_table`` lookup
+        for bare names so ``except SomeError:`` resolves correctly even when
+        ``SomeError`` is brought in via ``from x import SomeError``.
+        """
+        target: str | None = None
+        if isinstance(type_node, ast.Name):
+            name = type_node.id
+            candidate = self._ctx.import_table.get(name)
+            if candidate is not None:
+                target = candidate
+            else:
+                local_candidate = f"{self._ctx.module_fqn}.{name}"
+                if local_candidate in self._ctx.known_fqns:
+                    target = local_candidate
+        elif isinstance(type_node, ast.Attribute):
+            # Reuse the annotation resolver — it handles dotted chains via
+            # the import table the same way exception names work.
+            target = resolve_annotation(
+                type_node,
+                self._ctx.module_fqn,
+                self._ctx.import_table,
+                self._ctx.known_fqns,
+            )
+        if target is not None:
+            func_fqn = self._current_func_fqn()
+            caller = func_fqn if func_fqn is not None else self._current_caller()
+            self._emit(target, kind="except", caller=caller)
+
+    def _try_emit_isinstance_edge(self, node: ast.Call) -> bool:
+        """If *node* is an ``isinstance(obj, T)`` call, emit ``isinstance``
+        edges to T's resolved FQN(s) and return True.  Otherwise return False.
+
+        T may be a tuple ``isinstance(obj, (A, B))`` — one edge per element.
+        Edges are attributed to the innermost enclosing function (consistent
+        with the call-edge convention), falling back to module scope.
+
+        Resolution failures inside this method (e.g. unresolved name) are
+        non-fatal — return True regardless so the caller skips the normal
+        miss-classification path for the ``isinstance`` builtin itself.
+        """
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "isinstance"):
+            return False
+        if len(node.args) < 2:
+            return True  # malformed isinstance — still skip miss recording
+        try:
+            second = node.args[1]
+            type_exprs: list[ast.expr]
+            if isinstance(second, ast.Tuple):
+                type_exprs = list(second.elts)
+            else:
+                type_exprs = [second]
+            func_fqn = self._current_func_fqn()
+            caller = func_fqn if func_fqn is not None else self._current_caller()
+            for expr in type_exprs:
+                if isinstance(expr, (ast.Name, ast.Attribute)):
+                    resolved = resolve_annotation(
+                        expr,
+                        self._ctx.module_fqn,
+                        self._ctx.import_table,
+                        self._ctx.known_fqns,
+                    )
+                    if resolved is not None:
+                        self._emit(resolved, kind="isinstance", caller=caller)
+        except Exception as exc:  # noqa: BLE001
+            _warn_kind_failure("isinstance", self._file_path, exc)
+        return True
+
     def visit_Call(self, node: ast.Call) -> None:
+        # isinstance carve-out: emit isinstance kind edges to the checked
+        # type(s) and skip both the normal call-resolution path and the miss
+        # classification (isinstance is a builtin — emitting a "call" edge
+        # would be a false positive, and recording it as an unresolved miss
+        # would pollute the miss log).  Still recurse into children for
+        # nested calls inside the isinstance arguments.
+        if self._try_emit_isinstance_edge(node):
+            self.generic_visit(node)
+            return
         callee = self._resolve_expr(node.func, call_lineno=node.lineno)
         if callee is not None:
             self._emit(callee)
