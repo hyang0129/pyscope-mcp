@@ -22,6 +22,7 @@ import json as _json
 import logging
 import os
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -507,7 +508,7 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
             # Pass the current process environment so PYSCOPE_MCP_ROOT / PACKAGE / INDEX
             # env vars are forwarded to the subprocess.
             proc_result = subprocess.run(
-                ["pyscope-mcp", "build"],
+                [sys.executable, "-m", "pyscope_mcp.cli", "build"],
                 env=os.environ.copy(),
                 capture_output=True,
                 text=True,
