@@ -65,8 +65,9 @@ _SERVER = RpcServer(
     version=__version__,
     instructions=(
         "Query the prebuilt Python call-graph index. "
-        "Use stats to check graph size, callers_of/callees_of for function-level "
-        "traversal, module_callers/module_callees for module-level traversal, "
+        "Use stats to check graph size, refers_to for finding all typed references "
+        "to a symbol (calls, imports, except handlers, isinstance checks, annotations), "
+        "callees_of for what a function calls, module_callees for module-level callees, "
         "search for symbol lookup, file_skeleton for a file's symbol list, "
         "neighborhood for a bounded bidirectional subgraph around a symbol, "
         "build to rebuild the index from source (triggers pyscope-mcp build as a "
@@ -109,33 +110,78 @@ _TOOL_LIST = [
         "annotations": {"readOnlyHint": False, "idempotentHint": False},
     },
     {
-        "name": "callers_of",
+        "name": "refers_to",
         "description": (
-            "List functions that (transitively, up to depth) call the given function. "
-            "Results are capped at 50 and ranked by (hop_depth ASC, -total_degree DESC, fqn ASC) "
-            "so depth-1 callers always appear before depth-2 ones. "
-            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
-            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
-            "and narrow your query or escalate accordingly. "
+            "Find everything that references a given symbol or module — calls, imports, "
+            "except handlers, type annotations, isinstance checks. "
+            "Use `kind` to narrow by reference type and `granularity` to switch between "
+            "function-level and module-level results.\n"
+            "\n"
+            "kind (default: \"all\")\n"
+            "  \"all\"     — all AST reference types: calls, imports, except handlers, type "
+            "annotations, isinstance checks. Use for refactor safety: gives the complete set "
+            "of locations that will break if you rename or move the symbol.\n"
+            "  \"callers\" — call edges only (AST Call nodes: raise, instantiation, direct "
+            "invocation). Use for call-graph navigation: who drives this function?\n"
+            "\n"
+            "granularity (default: \"function\")\n"
+            "  \"function\" — results are individual function/method FQNs. Each result carries "
+            "a `context` field: \"call\" | \"import\" | \"except\" | \"annotation\" | \"isinstance\". "
+            "\"call\" wins when a function references the symbol in multiple ways.\n"
+            "  \"module\"   — results are deduplicated module FQNs (flat list, no per-entry "
+            "context). Use for dependency-graph views.\n"
+            "\n"
+            "depth: 1 or 2. depth > 2 returns {isError: true, error_reason: \"depth_exceeds_max\"}.\n"
+            "\n"
+            "Common patterns:\n"
+            "  refers_to(fqn)                                    — full reference map, "
+            "function-level (refactor audit)\n"
+            "  refers_to(fqn, kind=\"callers\")                   — call graph only (who runs this?)\n"
+            "  refers_to(fqn, granularity=\"module\")             — which modules reference this?\n"
+            "  refers_to(fqn, kind=\"callers\", granularity=\"module\") — replaces module_callers\n"
+            "\n"
+            "NOTE: Wildcard imports (from module import *) are not tracked and are silently "
+            "absent from results. See issue #74.\n"
+            "\n"
+            "Results are capped at 50 and ranked by (hop_depth ASC, -total_degree DESC, fqn ASC). "
+            "When the cap triggers, `truncated` is true and `dropped` is the count cut. "
+            "`dropped` is always present (0 when cap does not fire). "
+            "Response includes `completeness: 'complete' | 'partial'`. "
+            "'partial' means at least one result FQN has unresolved static-dispatch call edges "
+            "— it does NOT signal missing wildcard-import references. "
             "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
             "and `stale_action: str` when stale is true. "
             "Response includes commit-level staleness: `commit_stale: bool|null`, "
             "`index_git_sha: str|null`, `head_git_sha: str|null`. "
-            "Response includes `completeness: 'complete' | 'partial'`. "
-            "'partial' means at least one result FQN has unresolved static-dispatch calls "
-            "(e.g. getattr, duck typing, decorator registries) — verify with grep before "
-            "treating the result as exhaustive. "
-            "'complete' means no result FQN (or its class siblings) appears in the miss log. "
-            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}. "
-            "If the FQN is not in the index at all, returns {isError: true, error_reason: 'fqn_not_in_graph', stale: false, stale_files: []} — "
-            "this means the FQN is wrong; rebuilding the index will not help. "
-            "An FQN with zero callers returns results: [] (not an error)."
+            "Returns "
+            "{results: [{fqn, context, depth}, ...], truncated, dropped, completeness, stale, "
+            "stale_files, ...} for granularity=\"function\", or "
+            "{results: [module_fqn, ...], ...} for granularity=\"module\". "
+            "If the FQN is not in the index at all, returns {isError: true, "
+            "error_reason: 'fqn_not_in_graph', stale: false, stale_files: []} — "
+            "this means the FQN is wrong; rebuilding will not help. "
+            "Zero references returns results: [] (not an error)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "fqn": {"type": "string", "description": "Fully-qualified name, e.g. pkg.mod.func"},
-                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
+                "fqn": {
+                    "type": "string",
+                    "description": "Fully-qualified name or dotted module prefix, e.g. pkg.mod.ClassName or pkg.agents",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["all", "callers"],
+                    "default": "all",
+                    "description": "\"all\" returns every reference type; \"callers\" returns call edges only",
+                },
+                "granularity": {
+                    "type": "string",
+                    "enum": ["function", "module"],
+                    "default": "function",
+                    "description": "\"function\" returns individual FQNs with context; \"module\" returns deduplicated module FQNs",
+                },
+                "depth": {"type": "integer", "minimum": 1, "maximum": 2, "default": 1},
             },
             "required": ["fqn"],
         },
@@ -171,43 +217,6 @@ _TOOL_LIST = [
                 "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
             },
             "required": ["fqn"],
-        },
-        "annotations": {"readOnlyHint": True, "idempotentHint": True},
-    },
-    {
-        "name": "module_callers",
-        "description": (
-            "List modules that import/call into the given module or package prefix. "
-            "The `module` argument is treated as a dotted-prefix query: supply a full "
-            "FQN (e.g. `pkg.mod`) for an exact match, or a package prefix "
-            "(e.g. `pkg.agents`) to aggregate callers across all matching modules. "
-            "An empty string matches all modules. "
-            "Results are capped at 50, deduplicated, and ranked by "
-            "(hop_depth ASC, -total_degree DESC, fqn ASC) so depth-1 module callers "
-            "always appear before depth-2 ones. "
-            "When the cap triggers, `truncated` is true and `dropped` is the number of results cut. "
-            "`dropped` is always present (0 when cap does not fire) — use it to detect partial views "
-            "and narrow the prefix or escalate accordingly. "
-            "Response includes result-scoped staleness: `stale: bool`, `stale_files: list[str]`, "
-            "and `stale_action: str` when stale is true. "
-            "Response includes commit-level staleness: `commit_stale: bool|null`, "
-            "`index_git_sha: str|null`, `head_git_sha: str|null`. "
-            "Response includes `completeness: 'complete' | 'partial'`. "
-            "'partial' means at least one symbol in the result modules has unresolved "
-            "static-dispatch calls — verify with grep before treating as exhaustive. "
-            "'complete' means no symbol in the result modules appears in the miss log. "
-            "Returns {results: [...], truncated: bool, dropped: int, completeness: str, stale: bool, stale_files: [...], commit_stale, index_git_sha, head_git_sha}."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "module": {
-                    "type": "string",
-                    "description": "Dotted module prefix or exact FQN, e.g. 'pkg.agents' or 'pkg.agents.writer'",
-                },
-                "depth": {"type": "integer", "minimum": 1, "maximum": 10, "default": 1},
-            },
-            "required": ["module"],
         },
         "annotations": {"readOnlyHint": True, "idempotentHint": True},
     },
@@ -518,11 +527,14 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
     if name == "stats":
         return _text(idx.stats())
 
-    if name == "callers_of":
+    if name == "refers_to":
         fqn = arguments.get("fqn")
         if not fqn:
-            return _error_result("callers_of requires 'fqn'")
-        result = idx.callers_of(fqn, int(arguments.get("depth", 1)))
+            return _error_result("refers_to requires 'fqn'")
+        kind = str(arguments.get("kind", "all"))
+        granularity = str(arguments.get("granularity", "function"))
+        depth = int(arguments.get("depth", 1))
+        result = idx.refers_to(fqn, kind=kind, granularity=granularity, depth=depth)
         if result.get("isError"):
             return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
         return _text(result)
@@ -535,12 +547,6 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
         if result.get("isError"):
             return {"content": [{"type": "text", "text": _json.dumps(result, indent=2)}], "isError": True}
         return _text(result)
-
-    if name == "module_callers":
-        module = arguments.get("module")
-        if module is None:
-            return _error_result("module_callers requires 'module'")
-        return _text(idx.module_callers(module, int(arguments.get("depth", 1))))
 
     if name == "module_callees":
         module = arguments.get("module")

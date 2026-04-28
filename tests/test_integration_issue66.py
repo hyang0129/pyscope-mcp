@@ -339,7 +339,7 @@ class TestCommitStalenessQueryWiring:
 
     @pytest.mark.integration_wiring
     def test_callers_of_response_has_commit_staleness_fields(self, built_index) -> None:
-        """[wiring] callers_of response includes commit staleness keys over real stdio-RPC."""
+        """[wiring] refers_to response includes commit staleness keys over real stdio-RPC."""
         index_file, pkg_root, _, _ = built_index
         proc = _spawn_server(index_file, root=pkg_root)
         try:
@@ -347,7 +347,7 @@ class TestCommitStalenessQueryWiring:
 
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.alpha"}},
+                "params": {"name": "refers_to", "arguments": {"fqn": "mypkg.core.alpha", "kind": "callers"}},
             })
             r = _recv(proc)
             assert r["id"] == 2
@@ -358,7 +358,7 @@ class TestCommitStalenessQueryWiring:
 
             # [Assert] Commit staleness keys present
             assert "commit_stale" in body, (
-                "callers_of response must include 'commit_stale' over the wire"
+                "refers_to response must include 'commit_stale' over the wire"
             )
             assert "index_git_sha" in body
             assert "head_git_sha" in body

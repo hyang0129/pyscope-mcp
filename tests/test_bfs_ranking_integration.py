@@ -141,9 +141,10 @@ def test_callers_of_preserves_depth1_under_cap_via_analyzer(
 ) -> None:
     """Issue #59 regression: depth-1 callers must survive the 50-item cap
     even when 55 depth-2 callers sort alphabetically before them."""
-    result = callers_idx.callers_of(
-        "ranking_callers_fixture.target.target_fn", depth=2
+    result = callers_idx.refers_to(
+        "ranking_callers_fixture.target.target_fn", kind="callers", depth=2
     )
+    fqns = [e["fqn"] for e in result["results"]]
 
     assert result["truncated"] is True
     assert len(result["results"]) == _CAP
@@ -151,19 +152,19 @@ def test_callers_of_preserves_depth1_under_cap_via_analyzer(
 
     for i in range(1, _N_DEPTH1 + 1):
         fqn = f"ranking_callers_fixture.zdepth1.z_caller_{i:02d}"
-        assert fqn in result["results"], (
+        assert fqn in fqns, (
             f"depth-1 caller {fqn} dropped by cap — ranking did not run "
             f"before truncation"
         )
 
     z_indices = [
-        result["results"].index(f"ranking_callers_fixture.zdepth1.z_caller_{i:02d}")
+        fqns.index(f"ranking_callers_fixture.zdepth1.z_caller_{i:02d}")
         for i in range(1, _N_DEPTH1 + 1)
     ]
     last_depth1 = max(z_indices)
-    for item in result["results"]:
+    for item in fqns:
         if "adepth2.a_caller_" in item:
-            assert result["results"].index(item) > last_depth1, (
+            assert fqns.index(item) > last_depth1, (
                 f"depth-2 caller {item} ranked before a depth-1 caller"
             )
 
@@ -205,8 +206,8 @@ def test_callers_of_dropped_zero_when_under_cap_via_analyzer(
     callers_idx: CallGraphIndex,
 ) -> None:
     """Querying a depth-1-only result set must yield dropped=0, not absent."""
-    result = callers_idx.callers_of(
-        "ranking_callers_fixture.target.target_fn", depth=1
+    result = callers_idx.refers_to(
+        "ranking_callers_fixture.target.target_fn", kind="callers", depth=1
     )
     assert result["truncated"] is False
     assert result["dropped"] == 0

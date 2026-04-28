@@ -152,7 +152,7 @@ def test_callers_of_clean(tmp_path: Path) -> None:
     shas = {"mod.py": _sha256(content)}
     idx = _make_idx(tmp_path, _raw_ab(), skeletons, shas)
 
-    result = idx.callers_of("pkg.mod.fn_b", depth=1)
+    result = idx.refers_to("pkg.mod.fn_b", kind="callers", depth=1)
     assert result["stale"] is False
     assert result["stale_files"] == []
 
@@ -164,7 +164,7 @@ def test_callers_of_stale(tmp_path: Path) -> None:
     shas = {"mod.py": _sha256(b"def fn_a(): pass\n")}  # stored differs from disk
     idx = _make_idx(tmp_path, _raw_ab(), skeletons, shas)
 
-    result = idx.callers_of("pkg.mod.fn_b", depth=1)
+    result = idx.refers_to("pkg.mod.fn_b", kind="callers", depth=1)
     assert result["stale"] is True
     assert "mod.py" in result["stale_files"]
 
@@ -198,7 +198,7 @@ def test_callers_of_pre_v3(tmp_path: Path) -> None:
     """callers_of pre-v3 index returns index_format_incompatible."""
     skeletons = {"mod.py": [_sym("pkg.mod.fn_a"), _sym("pkg.mod.fn_b")]}
     idx = _make_idx(tmp_path, _raw_ab(), skeletons, file_shas=None)
-    result = idx.callers_of("pkg.mod.fn_b")
+    result = idx.refers_to("pkg.mod.fn_b", kind="callers")
     assert result["stale"] is True
     assert result["index_stale_reason"] == "index_format_incompatible"
 
@@ -324,7 +324,7 @@ def test_module_callers_clean(tmp_path: Path) -> None:
     idx = _make_idx(tmp_path, _raw_module(), skeletons, shas)
 
     # pkg.core calls pkg.util; module_callers("pkg.util") → ["pkg.core"]
-    result = idx.module_callers("pkg.util")
+    result = idx.refers_to("pkg.util.helper", kind="callers", granularity="module")
     assert result["stale"] is False
     assert result["stale_files"] == []
 
@@ -336,7 +336,7 @@ def test_module_callers_stale(tmp_path: Path) -> None:
     shas = {"core.py": _sha256(b"def run(): pass\n")}
     idx = _make_idx(tmp_path, _raw_module(), skeletons, shas)
 
-    result = idx.module_callers("pkg.util")
+    result = idx.refers_to("pkg.util.helper", kind="callers", granularity="module")
     assert result["stale"] is True
     assert "core.py" in result["stale_files"]
 
@@ -371,6 +371,6 @@ def test_module_callers_pre_v3(tmp_path: Path) -> None:
     """module_callers with pre-v3 index returns index_format_incompatible."""
     skeletons = {"core.py": [_sym("pkg.core.run")]}
     idx = _make_idx(tmp_path, _raw_module(), skeletons, file_shas=None)
-    result = idx.module_callers("pkg.util")
+    result = idx.refers_to("pkg.util.helper", kind="callers", granularity="module")
     assert result["stale"] is True
     assert result["index_stale_reason"] == "index_format_incompatible"

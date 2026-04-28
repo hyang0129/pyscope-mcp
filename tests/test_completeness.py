@@ -157,15 +157,16 @@ class TestCallersOfCompleteness:
 
     def test_complete_when_no_misses(self) -> None:
         idx = _make_idx(self._RAW, missed_callers={})
-        result = idx.callers_of("pkg.mod.helper")
+        result = idx.refers_to("pkg.mod.helper", kind="callers")
         assert result["completeness"] == "complete"
 
     def test_partial_when_result_has_direct_miss(self) -> None:
         missed = {"pkg.mod.MyClass.foo": {"getattr_nonliteral": 3}}
         idx = _make_idx(self._RAW, missed_callers=missed)
-        result = idx.callers_of("pkg.mod.helper")
+        result = idx.refers_to("pkg.mod.helper", kind="callers")
         # pkg.mod.MyClass.foo is in results and directly in missed_callers
-        assert "pkg.mod.MyClass.foo" in result["results"]
+        fqns = [e["fqn"] for e in result["results"]]
+        assert "pkg.mod.MyClass.foo" in fqns
         assert result["completeness"] == "partial"
 
     def test_partial_when_result_has_class_sibling_miss(self) -> None:
@@ -177,8 +178,9 @@ class TestCallersOfCompleteness:
         }
         missed = {"pkg.mod.MyClass.foo": {"getattr_nonliteral": 3}}
         idx = _make_idx(raw, missed_callers=missed)
-        result = idx.callers_of("pkg.mod.helper")
-        assert "pkg.mod.MyClass.bar" in result["results"]
+        result = idx.refers_to("pkg.mod.helper", kind="callers")
+        fqns = [e["fqn"] for e in result["results"]]
+        assert "pkg.mod.MyClass.bar" in fqns
         assert result["completeness"] == "partial"
 
     def test_complete_for_top_level_sibling_miss(self) -> None:
@@ -190,12 +192,12 @@ class TestCallersOfCompleteness:
         }
         missed = {"pkg.mod.dirty_func": {"bare_name_unresolved": 1}}
         idx = _make_idx(raw, missed_callers=missed)
-        result = idx.callers_of("pkg.mod.helper")
+        result = idx.refers_to("pkg.mod.helper", kind="callers")
         assert result["completeness"] == "complete"
 
     def test_completeness_field_always_present(self) -> None:
         idx = _make_idx(self._RAW, missed_callers={})
-        result = idx.callers_of("pkg.mod.helper")
+        result = idx.refers_to("pkg.mod.helper", kind="callers")
         assert "completeness" in result
 
 
@@ -296,7 +298,7 @@ class TestModuleCompleteness:
 
     def test_module_callers_complete_when_no_misses(self) -> None:
         idx = _make_idx(self._RAW, missed_callers={}, skeletons=self._SKELETONS)
-        result = idx.module_callers("pkg.target")
+        result = idx.refers_to("pkg.target.helper", kind="callers", granularity="module")
         assert result["completeness"] == "complete"
 
     def test_module_callers_partial_when_symbol_in_result_module_is_missed(self) -> None:
@@ -305,7 +307,7 @@ class TestModuleCompleteness:
         # is what appears in the module graph and in the module_callers result.
         missed = {"pkg.other.SomeClass.method": {"getattr_nonliteral": 2}}
         idx = _make_idx(self._RAW, missed_callers=missed, skeletons=self._SKELETONS)
-        result = idx.module_callers("pkg.target")
+        result = idx.refers_to("pkg.target.helper", kind="callers", granularity="module")
         # The module graph reports the caller as "pkg.other.SomeClass"
         assert "pkg.other.SomeClass" in result["results"]
         assert result["completeness"] == "partial"
@@ -322,7 +324,7 @@ class TestModuleCompleteness:
             "pkg/target.py": [_sym("pkg.target.helper")],
         }
         idx = _make_idx(self._RAW, missed_callers=missed, skeletons=skeletons)
-        result = idx.module_callers("pkg.target")
+        result = idx.refers_to("pkg.target.helper", kind="callers", granularity="module")
         assert result["completeness"] == "partial"
 
     def test_module_callees_complete_when_no_misses(self) -> None:
@@ -340,7 +342,7 @@ class TestModuleCompleteness:
 
     def test_module_completeness_field_always_present(self) -> None:
         idx = _make_idx(self._RAW, missed_callers={}, skeletons=self._SKELETONS)
-        result = idx.module_callers("pkg.target")
+        result = idx.refers_to("pkg.target.helper", kind="callers", granularity="module")
         assert "completeness" in result
         result2 = idx.module_callees("pkg.other")
         assert "completeness" in result2

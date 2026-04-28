@@ -140,12 +140,12 @@ class TestB1GraphToTypes:
         idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw), git_sha=_MOCK_INDEX_SHA)
 
         with patch("subprocess.run", return_value=_git_ok(_MOCK_HEAD_SHA)):
-            result = idx.callers_of("pkg.mod.beta", depth=1)
+            result = idx.refers_to("pkg.mod.beta", kind="callers", depth=1)
 
         # [Assert] All three commit fields are present.
-        assert "commit_stale" in result, "commit_stale must be in callers_of result"
-        assert "index_git_sha" in result, "index_git_sha must be in callers_of result"
-        assert "head_git_sha" in result, "head_git_sha must be in callers_of result"
+        assert "commit_stale" in result, "commit_stale must be in refers_to result"
+        assert "index_git_sha" in result, "index_git_sha must be in refers_to result"
+        assert "head_git_sha" in result, "head_git_sha must be in refers_to result"
 
         # [Assert] Types match the TypedDict contract (NotRequired[bool|None] / NotRequired[str|None]).
         assert isinstance(result["commit_stale"], bool), (

@@ -153,19 +153,19 @@ def _read_log(log_path: Path) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# S1 — happy-path tool call (callers_of)
+# S1 — happy-path tool call (refers_to)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_s1_happy_path_callers_of(server: RpcServer, tmp_index: Path, log_path: Path):
-    """S1: callers_of call appends one valid JSONL entry."""
+    """S1: refers_to call appends one valid JSONL entry."""
     import pyscope_mcp.server as srv
     srv._INDEX = CallGraphIndex.load(tmp_index)
 
     _init_logger(log_path)
 
     lines = [
-        _req("tools/call", {"name": "callers_of", "arguments": {"fqn": "pkg.mod.bar"}}, req_id=7),
+        _req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers"}}, req_id=7),
     ]
     responses = await _run(server, lines)
 
@@ -181,7 +181,7 @@ async def test_s1_happy_path_callers_of(server: RpcServer, tmp_index: Path, log_
     assert e["ts"]  # non-empty ISO string
     assert e["server_id"]  # non-empty UUID string
     assert e["rpc_id"] == 7
-    assert e["tool"] == "callers_of"
+    assert e["tool"] == "refers_to"
     assert "fqn" in e["args"]
     assert isinstance(e["duration_ms"], int) and e["duration_ms"] >= 0
     assert e["is_error"] is False
