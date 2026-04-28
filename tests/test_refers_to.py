@@ -345,3 +345,46 @@ def test_refers_to_module_granularity_deduplicates_modules(tmp_path: Path) -> No
     assert result["results"].count("pkg.caller_mod") == 1, (
         "same caller module must appear only once in module granularity results"
     )
+
+
+# ---------------------------------------------------------------------------
+# 13. kind="all" depth=2 expands through all edge kinds at hop 2 (post-#92 semantics)
+# ---------------------------------------------------------------------------
+
+def test_refers_to_all_depth2_follows_non_call_edges_at_hop2(tmp_path: Path) -> None:
+    """kind='all' at depth=2 must expand through non-call edge kinds at hop 2.
+
+    Graph: depth2 --(import)--> depth1 --(call)--> target
+
+    Before issue #92 the second-hop expansion in _bfs_nodes_called_by followed
+    only call edges, so depth2 would NOT have been returned.  After #92 the BFS
+    uses GraphReader.bfs(kinds=None), which follows all edge kinds at every hop —
+    so depth2 IS returned.  This test pins the new semantics.
+    """
+    target = "pkg.target.fn"
+    depth1 = "pkg.a.direct_caller"
+    depth2 = "pkg.b.indirect_importer"
+
+    nodes = _merge_nodes(
+        _nodes_with_kind(depth1, target, "call"),    # hop 1: call edge
+        _nodes_with_kind(depth2, depth1, "import"),  # hop 2: import edge (not call)
+    )
+    idx = _idx(tmp_path, nodes)
+
+    result = idx.refers_to(target, kind="all", depth=2)
+
+    assert result.get("isError") is not True, f"unexpected error: {result}"
+    fqns = [e["fqn"] for e in result["results"]]
+    assert depth1 in fqns, "direct caller (hop 1, call edge) must appear in depth=2 results"
+    assert depth2 in fqns, (
+        "indirect importer (hop 2, import edge) must appear in kind='all' depth=2 results. "
+        "GraphReader.bfs(kinds=None) follows all edge kinds at every hop."
+    )
+    # context for depth2 must reflect the import edge (no call edge present)
+    entry = next(e for e in result["results"] if e["fqn"] == depth2)
+    assert entry["context"] == "import", (
+        f"context for depth2 importer must be 'import', got '{entry['context']}'"
+    )
+    assert entry["depth"] == 2, (
+        f"depth field for depth2 importer must be 2, got {entry['depth']!r}"
+    )

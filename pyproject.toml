@@ -50,4 +50,5 @@ testpaths = ["tests"]
 markers = [
     "integration_wiring: wiring-tier integration tests (fast, real subprocess, stdio JSON-RPC)",
     "integration_artifact: artifact-tier integration tests (exact output, nightly or on label)",
+    "component: component tests — two or more real modules across one named boundary",
 ]

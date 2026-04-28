@@ -91,7 +91,7 @@ def test_load_accepts_v5_index(tmp_path: Path) -> None:
     idx = _make_index(tmp_path)
     saved = idx.save(tmp_path / "index.json")
     loaded = CallGraphIndex.load(saved)
-    assert loaded.function_graph.number_of_nodes() == idx.function_graph.number_of_nodes()
+    assert loaded._reader.num_nodes() == idx._reader.num_nodes()
 
 
 # ---------------------------------------------------------------------------
