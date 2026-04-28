@@ -1092,7 +1092,7 @@ def test_per_kind_isolation_call_edges_survive_missing_import_bucket(
         },
         "pkg.helpers.helper_a": {
             "calls": {},
-            "called_by": {"call": ["pkg.mod.caller"]},
+            "called_by": {"call": ["pkg.mod.caller", "pkg.other.caller"]},
         },
         "pkg.helpers.helper_b": {
             "calls": {},

@@ -6,7 +6,7 @@ import subprocess
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TypedDict
+from typing import Iterable, Iterator, Literal, TypedDict
 
 from pyscope_mcp.types import (
     CalleesResult,
@@ -32,97 +32,192 @@ class SymbolSummary(TypedDict):
 _SKELETON_CAP = 50
 
 
-class _DiGraph:
-    """Minimal directed-graph backed by plain dicts.
+class GraphReader:
+    """Thin facade over the site-keyed ``nodes`` dict.
 
-    Replaces networkx.DiGraph — only the operations actually used by
-    CallGraphIndex are implemented.  Cold-start impact: ~7 s saved.
+    All traversal in :class:`CallGraphIndex` goes through this reader — no
+    parallel adjacency structure, no separate storage.  Edge kinds are first-class:
+    every method accepts an optional ``kinds`` filter so callers can restrict
+    traversal to a subset of edge kinds (e.g. ``kinds=("call",)`` for call-only
+    traversal, ``kinds=None`` for all kinds).
+
+    The reader has zero state beyond the ``nodes`` reference passed to
+    ``__init__``.  No caches, no rebuilt structures.  Caches (like
+    ``_in_degree_threshold``) live on :class:`CallGraphIndex`, not here.
     """
 
-    def __init__(self) -> None:
-        self._succ: dict[str, set[str]] = {}
-        self._pred: dict[str, set[str]] = {}
+    def __init__(self, nodes: dict[str, dict]) -> None:
+        self.nodes = nodes
 
-    # ------------------------------------------------------------------ nodes
-    def add_node(self, n: str) -> None:
-        self._succ.setdefault(n, set())
-        self._pred.setdefault(n, set())
+    # ---------------------------------------------------------------- existence
 
-    # ------------------------------------------------------------------ edges
-    def add_edge(self, u: str, v: str) -> None:
-        self.add_node(u)
-        self.add_node(v)
-        self._succ[u].add(v)
-        self._pred[v].add(u)
+    def __contains__(self, fqn: object) -> bool:
+        return fqn in self.nodes
 
-    # ---------------------------------------------------------------- queries
-    def successors(self, n: str):  # type: ignore[return]
-        return iter(self._succ.get(n, ()))
+    def nodes_iter(self) -> Iterator[str]:
+        return iter(self.nodes)
 
-    def predecessors(self, n: str):  # type: ignore[return]
-        return iter(self._pred.get(n, ()))
+    def num_nodes(self) -> int:
+        return len(self.nodes)
 
-    def __contains__(self, n: object) -> bool:
-        return n in self._succ
+    # ---------------------------------------------------------- kind-aware neighbors
 
-    @property
-    def nodes(self):  # type: ignore[return]
-        return self._succ.keys()
+    def successors(
+        self, fqn: str, kinds: Iterable[str] | None = None
+    ) -> Iterator[str]:
+        """Iterate callees of *fqn*, optionally filtered to *kinds*."""
+        calls = self.nodes.get(fqn, {}).get("calls", {}) or {}
+        seen: set[str] = set()
+        if kinds is None:
+            for targets in calls.values():
+                for t in targets:
+                    if t not in seen:
+                        seen.add(t)
+                        yield t
+        else:
+            for kind in kinds:
+                for t in calls.get(kind, ()):
+                    if t not in seen:
+                        seen.add(t)
+                        yield t
 
-    def number_of_nodes(self) -> int:
-        return len(self._succ)
+    def predecessors(
+        self, fqn: str, kinds: Iterable[str] | None = None
+    ) -> Iterator[str]:
+        """Iterate callers of *fqn*, optionally filtered to *kinds*."""
+        called_by = self.nodes.get(fqn, {}).get("called_by", {}) or {}
+        seen: set[str] = set()
+        if kinds is None:
+            for sources in called_by.values():
+                for s in sources:
+                    if s not in seen:
+                        seen.add(s)
+                        yield s
+        else:
+            for kind in kinds:
+                for s in called_by.get(kind, ()):
+                    if s not in seen:
+                        seen.add(s)
+                        yield s
 
-    def number_of_edges(self) -> int:
-        return sum(len(v) for v in self._succ.values())
+    def out_edges(
+        self, fqn: str, kinds: Iterable[str] | None = None
+    ) -> Iterator[tuple[str, str, str]]:
+        """Yield (src, dst, kind) tuples for all outgoing edges from *fqn*."""
+        calls = self.nodes.get(fqn, {}).get("calls", {}) or {}
+        if kinds is None:
+            for kind, targets in calls.items():
+                for t in targets:
+                    yield (fqn, t, kind)
+        else:
+            for kind in kinds:
+                for t in calls.get(kind, ()):
+                    yield (fqn, t, kind)
 
-    # ----------------------------------------------------------------- views
-    def reverse(self, copy: bool = False) -> "_DiGraphReverseView":
-        """Return a view that swaps successor/predecessor lookup (no copy).
+    def in_edges(
+        self, fqn: str, kinds: Iterable[str] | None = None
+    ) -> Iterator[tuple[str, str, str]]:
+        """Yield (src, dst, kind) tuples for all incoming edges to *fqn*."""
+        called_by = self.nodes.get(fqn, {}).get("called_by", {}) or {}
+        if kinds is None:
+            for kind, sources in called_by.items():
+                for s in sources:
+                    yield (s, fqn, kind)
+        else:
+            for kind in kinds:
+                for s in called_by.get(kind, ()):
+                    yield (s, fqn, kind)
 
-        ``copy=True`` is not supported — this implementation only holds a live
-        view.  Passing ``copy=True`` raises ``NotImplementedError``.
+    # ------------------------------------------------------------------ degree
+
+    def out_degree(self, fqn: str, kinds: Iterable[str] | None = None) -> int:
+        """Return the number of distinct callees of *fqn* (kind-filtered)."""
+        return sum(1 for _ in self.successors(fqn, kinds))
+
+    def in_degree(self, fqn: str, kinds: Iterable[str] | None = None) -> int:
+        """Return the number of distinct callers of *fqn* (kind-filtered)."""
+        return sum(1 for _ in self.predecessors(fqn, kinds))
+
+    # --------------------------------------------------------------- BFS primitive
+
+    def bfs(
+        self,
+        start: str,
+        depth: int,
+        direction: Literal["calls", "called_by"],
+        kinds: Iterable[str] | None = None,
+    ) -> dict[str, tuple[int, dict[str, int]]]:
+        """BFS from *start* up to *depth* hops in *direction*.
+
+        Returns ``{fqn: (min_hop, {kind: hop_at_first_seen})}`` for each
+        reachable node (excluding *start* itself).
+
+        ``direction="calls"`` traverses successors (callees direction).
+        ``direction="called_by"`` traverses predecessors (callers direction).
+
+        ``kinds=None`` follows all edge kinds.  ``kinds=("call",)`` restricts
+        traversal to call edges only.
+
+        ``depth=0`` returns ``{}``.  If *start* is not in the graph, returns ``{}``.
         """
-        if copy:
-            raise NotImplementedError("_DiGraph.reverse(copy=True) is not supported")
-        return _DiGraphReverseView(self)
+        if depth <= 0 or start not in self.nodes:
+            return {}
 
-    # --------------------------------------------------------------- display
-    def __repr__(self) -> str:
-        return (
-            f"_DiGraph(nodes={self.number_of_nodes()}, edges={self.number_of_edges()})"
-        )
+        kinds_list: list[str] | None = list(kinds) if kinds is not None else None
 
+        # seen: fqn -> (min_hop, {kind: hop_at_first_seen})
+        seen: dict[str, tuple[int, dict[str, int]]] = {}
+        frontier: list[str] = [start]
 
-class _DiGraphReverseView:
-    """Read-only reversed view of a _DiGraph (swaps succ ↔ pred)."""
+        for hop in range(1, depth + 1):
+            nxt: list[str] = []
+            for n in frontier:
+                record = self.nodes.get(n, {})
+                bucket = record.get(direction, {}) or {}
+                if kinds_list is None:
+                    neighbors_iter: Iterable[tuple[str, str]] = (
+                        (neighbor, kind)
+                        for kind, neighbors in bucket.items()
+                        for neighbor in neighbors
+                    )
+                else:
+                    neighbors_iter = (
+                        (neighbor, kind)
+                        for kind in kinds_list
+                        for neighbor in bucket.get(kind, ())
+                    )
+                for neighbor, kind in neighbors_iter:
+                    if neighbor == start:
+                        continue
+                    if neighbor not in seen:
+                        seen[neighbor] = (hop, {kind: hop})
+                        nxt.append(neighbor)
+                    else:
+                        cur_hop, cur_kinds = seen[neighbor]
+                        if kind not in cur_kinds:
+                            cur_kinds[kind] = hop
+                        if hop < cur_hop:
+                            seen[neighbor] = (hop, cur_kinds)
+            frontier = nxt
 
-    def __init__(self, g: _DiGraph) -> None:
-        self._g = g
+        return seen
 
-    def successors(self, n: str):  # type: ignore[return]
-        return iter(self._g._pred.get(n, ()))
+    # ------------------------------------------------------------------ counts
 
-    def predecessors(self, n: str):  # type: ignore[return]
-        return iter(self._g._succ.get(n, ()))
+    def num_edges(self, kind: str | None = None) -> int:
+        """Return total edge count, optionally restricted to *kind*.
 
-    def __contains__(self, n: object) -> bool:
-        return n in self._g._succ
-
-    @property
-    def nodes(self):  # type: ignore[return]
-        return self._g._succ.keys()
-
-    def number_of_nodes(self) -> int:
-        return self._g.number_of_nodes()
-
-    def number_of_edges(self) -> int:
-        return self._g.number_of_edges()
-
-    def __repr__(self) -> str:
-        return (
-            f"_DiGraphReverseView(nodes={self.number_of_nodes()},"
-            f" edges={self.number_of_edges()})"
-        )
+        Counts unique (src, dst) pairs per kind — does not deduplicate across
+        kinds when ``kind=None``.
+        """
+        total = 0
+        for record in self.nodes.values():
+            calls = record.get("calls", {}) or {}
+            if kind is None:
+                total += sum(len(v) for v in calls.values())
+            else:
+                total += len(calls.get(kind, ()))
+        return total
 
 
 def _compute_content_hash(nodes: dict[str, dict]) -> str:
@@ -203,17 +298,18 @@ class CallGraphIndex:
 
     The source of truth is ``nodes``: a site-keyed mapping
     ``{symbol_fqn: {"calls": {kind: [callees]}, "called_by": {kind: [callers]}}}``.
-    Graphs are derived from ``nodes[s]["calls"]["call"]`` on construction and
-    on ``load``.  The legacy ``raw`` property projects the same call edges in
-    the pre-migration shape for transitional callers.
+    All traversal goes through ``_reader``, a :class:`GraphReader` constructed
+    from ``nodes``.  ``module_index`` maps each module FQN to the set of symbol
+    FQNs it contains, supporting module-level traversal without a second graph.
+
+    The legacy ``raw`` property projects the same call edges in the
+    pre-migration shape for transitional callers.
 
     ``skeletons`` maps relative file paths → pre-computed lists of SymbolSummary
     dicts, populated during ``pyscope-mcp build`` (index version 2+).
     """
 
     root: Path
-    function_graph: _DiGraph = field(default_factory=_DiGraph)
-    module_graph: _DiGraph = field(default_factory=_DiGraph)
     # v5+: site-keyed nodes — replaces the legacy ``raw`` field.  The ``raw``
     # property below derives a call-only projection for transitional callers.
     nodes: dict[str, dict] = field(default_factory=dict)
@@ -229,12 +325,17 @@ class CallGraphIndex:
     # v5+: SHA-256 hex digest of the deterministically serialised raw dict.
     # Computed at from_raw time; persisted in the index header.
     content_hash: str = field(default="")
-    # Derived at load/from_raw time: maps FQN → relative file path (inverted from skeletons).
+    # Derived at load/from_nodes time: maps FQN → relative file path (inverted from skeletons).
     # Not serialised — rebuilt on every load.
     _fqn_to_file: dict[str, str] = field(default_factory=dict, repr=False)
     # Computed at from_nodes time: p99 of in-degree distribution, floor of 10.
     # Used by neighborhood() for hub suppression. Not serialised — recomputed on load.
     _in_degree_threshold: int = field(default=10, repr=False)
+    # Thin facade over nodes dict for all traversal — never serialised.
+    _reader: GraphReader = field(default_factory=lambda: GraphReader({}), repr=False)
+    # Module-level index: module_fqn → set of symbol FQNs.  Built once from nodes keys.
+    # Replaces module_graph for module-level traversal. Not serialised.
+    _module_index: dict[str, set[str]] = field(default_factory=dict, repr=False)
 
     @property
     def raw(self) -> dict[str, list[str]]:
@@ -259,27 +360,21 @@ class CallGraphIndex:
     ) -> "CallGraphIndex":
         """Construct a CallGraphIndex from the site-keyed ``nodes`` shape.
 
-        Populates ``function_graph`` and ``module_graph`` from
-        ``nodes[s]["calls"]["call"]`` only — non-call kinds are stored in
-        ``nodes`` but are not used by the existing graph traversal layer
-        (see Decision Prior "Keep _DiGraph" in epic #76's intent doc).
+        Builds a :class:`GraphReader` over *nodes* for all traversal and a
+        ``module_index`` for module-level queries.  The O(E) ``_DiGraph``
+        rebuild step that previously populated ``function_graph`` and
+        ``module_graph`` is gone — traversal is now O(1) per lookup via the
+        reader.
         """
         root = Path(root).resolve()
-        fg = _DiGraph()
-        mg = _DiGraph()
-        # Ensure every site key is a graph node, even when its calls bucket
-        # is empty (so callers_of returns empty results, not fqn_not_in_graph).
-        for caller in nodes:
-            fg.add_node(caller)
-            mg.add_node(_module_of(caller))
-        for caller, record in nodes.items():
-            callees = record.get("calls", {}).get("call", ())
-            cm = _module_of(caller)
-            for callee in callees:
-                fg.add_edge(caller, callee)
-                tm = _module_of(callee)
-                if cm != tm:
-                    mg.add_edge(cm, tm)
+        reader = GraphReader(nodes)
+
+        # Build module_index: module_fqn → set of symbol FQNs (O(N) over keys).
+        module_index: dict[str, set[str]] = {}
+        for sym in nodes:
+            mod = _module_of(sym)
+            module_index.setdefault(mod, set()).add(sym)
+
         skeletons = skeletons or {}
         # Invert skeletons → _fqn_to_file: {fqn: rel_path}
         fqn_to_file: dict[str, str] = {}
@@ -287,13 +382,11 @@ class CallGraphIndex:
             for sym in symbols:
                 fqn_to_file[sym["fqn"]] = rel_path
         # Compute in-degree threshold: p99 of in-degree distribution, floor of 10.
-        in_degree_threshold = _compute_in_degree_threshold(fg)
+        in_degree_threshold = _compute_in_degree_threshold(reader)
         # Compute content_hash from the canonical projection of call edges.
         content_hash = _compute_content_hash(nodes)
         return cls(
             root=root,
-            function_graph=fg,
-            module_graph=mg,
             nodes=nodes,
             skeletons=skeletons,
             file_shas=file_shas,
@@ -302,6 +395,8 @@ class CallGraphIndex:
             content_hash=content_hash,
             _fqn_to_file=fqn_to_file,
             _in_degree_threshold=in_degree_threshold,
+            _reader=reader,
+            _module_index=module_index,
         )
 
     @classmethod
@@ -624,31 +719,27 @@ class CallGraphIndex:
 
     def _rank_bfs_results(
         self,
-        bfs_result: dict[str, int],
-        graph: _DiGraph | _DiGraphReverseView,
+        bfs_result: dict[str, tuple[int, dict[str, int]]],
+        reader: "GraphReader",
     ) -> list[str]:
         """Rank BFS result nodes by (hop_depth ASC, -total_degree DESC, fqn ASC).
 
         ``total_degree`` = in-degree + out-degree of the result node in the
-        underlying function graph.  Uses the same ranking convention as
-        :meth:`neighborhood`.
+        underlying function graph (call edges only — proxy for importance).
 
-        For a ``_DiGraphReverseView``, the backing ``_DiGraph`` (``graph._g``)
-        is used to look up both in-degree and out-degree so the degree reflects
-        the real graph topology regardless of traversal direction.
+        ``reader.out_degree`` reads from ``calls`` and ``reader.in_degree``
+        reads from ``called_by`` — no direction flag needed.
         """
-        # Resolve the underlying forward graph for degree computation.
-        fwd: _DiGraph = graph._g if isinstance(graph, _DiGraphReverseView) else graph  # type: ignore[assignment]
 
         def total_degree(n: str) -> int:
-            out_deg = sum(1 for _ in fwd.successors(n))
-            in_deg = sum(1 for _ in fwd._pred.get(n, ()))
-            return out_deg + in_deg
+            return reader.out_degree(n, kinds=("call",)) + reader.in_degree(
+                n, kinds=("call",)
+            )
 
         degree_cache: dict[str, int] = {n: total_degree(n) for n in bfs_result}
         return sorted(
             bfs_result,
-            key=lambda n: (bfs_result[n], -degree_cache[n], n),
+            key=lambda n: (bfs_result[n][0], -degree_cache[n], n),
         )
 
     def refers_to(
@@ -716,10 +807,9 @@ class CallGraphIndex:
             }
 
         if kind == "callers":
-            # Reuse existing call-edge BFS on the reversed function_graph.
-            rev_fg = self.function_graph.reverse(copy=False)
-            bfs_result = _bfs(rev_fg, fqn, depth)
-            ranked_fqns = self._rank_bfs_results(bfs_result, rev_fg)
+            # BFS over called_by["call"] edges only (call-edge traversal).
+            bfs_result = self._reader.bfs(fqn, depth, direction="called_by", kinds=("call",))
+            ranked_fqns = self._rank_bfs_results(bfs_result, self._reader)
             dropped = max(0, len(ranked_fqns) - self._CALLERS_CALLEES_CAP)
             truncated = dropped > 0
             ranked_fqns = ranked_fqns[: self._CALLERS_CALLEES_CAP]
@@ -740,7 +830,7 @@ class CallGraphIndex:
 
             # granularity == "function"
             entries: list[ReferencedByEntry] = [
-                ReferencedByEntry(fqn=f, context="call", depth=bfs_result[f])
+                ReferencedByEntry(fqn=f, context="call", depth=bfs_result[f][0])
                 for f in ranked_fqns
             ]
             staleness = self._staleness_for(ranked_fqns)
@@ -757,16 +847,15 @@ class CallGraphIndex:
         # kind == "all" — walk nodes["called_by"] for all edge kinds.
         # Context priority: "call" > all other kinds (first-encountered non-call).
         _CONTEXT_PRIORITY = ("call", "import", "except", "annotation", "isinstance")
-        bfs_all = _bfs_nodes_called_by(self.nodes, fqn, depth)
+        bfs_all = self._reader.bfs(fqn, depth, direction="called_by", kinds=None)
         # bfs_all: dict[referencing_fqn -> (min_hop, {kind: hop_at_which_seen})]
         # Rank by (hop ASC, -total_degree DESC, fqn ASC).
-        # total_degree from function_graph (call edges only — proxy for importance).
-        fg = self.function_graph
+        # total_degree via reader (call edges only — proxy for importance).
 
         def _total_degree_all(n: str) -> int:
-            out_d = sum(1 for _ in fg.successors(n))
-            in_d = len(fg._pred.get(n, ()))
-            return out_d + in_d
+            return self._reader.out_degree(n, kinds=("call",)) + self._reader.in_degree(
+                n, kinds=("call",)
+            )
 
         sorted_fqns = sorted(
             bfs_all,
@@ -829,7 +918,7 @@ class CallGraphIndex:
         ``stale: False``.  An FQN that is present but has zero callees returns
         ``results: []`` (not an error).
         """
-        if fqn not in self.function_graph.nodes:
+        if fqn not in self._reader:
             commit = self._commit_staleness()
             return {  # type: ignore[return-value]
                 "isError": True,
@@ -838,9 +927,8 @@ class CallGraphIndex:
                 "stale_files": [],
                 **commit,
             }
-        fg = self.function_graph
-        bfs_result = _bfs(fg, fqn, depth)
-        ranked = self._rank_bfs_results(bfs_result, fg)
+        bfs_result = self._reader.bfs(fqn, depth, direction="calls", kinds=("call",))
+        ranked = self._rank_bfs_results(bfs_result, self._reader)
         dropped = max(0, len(ranked) - self._CALLERS_CALLEES_CAP)
         truncated = dropped > 0
         results = ranked[: self._CALLERS_CALLEES_CAP]
@@ -895,11 +983,8 @@ class CallGraphIndex:
         ``depth_full`` reflects the actual graph depth, not the declared *depth*
         parameter (if the graph is shallower, ``depth_full`` mirrors reality).
         """
-        fg = self.function_graph
-        rev_fg = fg.reverse(copy=False)
-
         # Guard: FQN not in graph at all → clear not-found error (not ambiguous empty-edges)
-        if symbol not in fg.nodes:
+        if symbol not in self._reader:
             commit = self._commit_staleness()
             return {  # type: ignore[return-value]
                 "isError": True,
@@ -938,7 +1023,7 @@ class CallGraphIndex:
             next_d = d + 1
 
             # Callees direction: node → callee (out-degree; always expand)
-            for callee in fg.successors(node):
+            for callee in self._reader.successors(node, kinds=("call",)):
                 edge = (node, callee)
                 if edge not in edge_depths or edge_depths[edge] > next_d:
                     edge_depths[edge] = next_d
@@ -949,7 +1034,7 @@ class CallGraphIndex:
             # Callers direction: caller → node (in-degree; hub suppression applies)
             # A node is treated as a hub if its in-degree exceeds the threshold AND
             # it is not the queried symbol itself (the queried symbol is always exempt).
-            node_in_degree = sum(1 for _ in rev_fg.successors(node))
+            node_in_degree = self._reader.in_degree(node, kinds=("call",))
             is_hub = (
                 not expand_hubs
                 and node != symbol
@@ -963,7 +1048,7 @@ class CallGraphIndex:
                 # further through the hub.
                 continue
 
-            for caller in rev_fg.successors(node):
+            for caller in self._reader.predecessors(node, kinds=("call",)):
                 edge = (caller, node)
                 if edge not in edge_depths or edge_depths[edge] > next_d:
                     edge_depths[edge] = next_d
@@ -998,7 +1083,8 @@ class CallGraphIndex:
         # redundant traversals during sort.
         caller_nodes = {e[0] for e in edge_depths}
         degree_cache: dict[str, int] = {
-            n: sum(1 for _ in fg.successors(n)) + sum(1 for _ in rev_fg.successors(n))
+            n: self._reader.out_degree(n, kinds=("call",))
+            + self._reader.in_degree(n, kinds=("call",))
             for n in caller_nodes
         }
 
@@ -1072,20 +1158,30 @@ class CallGraphIndex:
     def _rank_module_bfs_results(
         self,
         bfs_result: dict[str, int],
-        module_graph: _DiGraph,
+        reader: "GraphReader",
     ) -> list[str]:
         """Rank module BFS result nodes by (hop_depth ASC, -total_degree DESC, fqn ASC).
 
-        ``total_degree`` = in-degree + out-degree of the result module node in
-        *module_graph*.  Uses the same ranking convention as :meth:`neighborhood`.
+        ``total_degree`` = in-degree + out-degree of the result module, computed
+        by counting how many distinct modules appear as callers/callees across all
+        symbols in the module.  Uses the same ranking convention as
+        :meth:`neighborhood`.
         """
-        rev_mg = module_graph.reverse(copy=False)
 
-        def total_degree(n: str) -> int:
-            return (
-                sum(1 for _ in module_graph.successors(n))
-                + sum(1 for _ in rev_mg.successors(n))
-            )
+        def total_degree(mod: str) -> int:
+            # Out-degree: distinct callee modules reached from this module's symbols.
+            callee_mods: set[str] = set()
+            for sym in self._module_index.get(mod, ()):
+                for callee in reader.successors(sym, kinds=("call",)):
+                    callee_mods.add(_module_of(callee))
+            callee_mods.discard(mod)
+            # In-degree: distinct caller modules that reach into this module's symbols.
+            caller_mods: set[str] = set()
+            for sym in self._module_index.get(mod, ()):
+                for caller in reader.predecessors(sym, kinds=("call",)):
+                    caller_mods.add(_module_of(caller))
+            caller_mods.discard(mod)
+            return len(callee_mods) + len(caller_mods)
 
         degree_cache: dict[str, int] = {n: total_degree(n) for n in bfs_result}
         return sorted(
@@ -1103,9 +1199,9 @@ class CallGraphIndex:
         callees always precede depth-2 ones regardless of alphabetical order.
         Completeness is computed over the expanded symbol FQNs of the result modules.
         """
-        base = _prefix_module_bfs(self.module_graph, self.module_graph, module, depth)
+        base = _prefix_module_bfs(self._reader, self._module_index, module, depth)
         raw_union: dict[str, int] = base["results"]  # type: ignore[assignment]
-        ranked = self._rank_module_bfs_results(raw_union, self.module_graph)
+        ranked = self._rank_module_bfs_results(raw_union, self._reader)
         cap = _MODULE_BFS_CAP
         dropped: int = base["dropped"]  # type: ignore[assignment]
         result_modules = ranked[:cap]
@@ -1167,7 +1263,7 @@ class CallGraphIndex:
           - ``stale``, ``stale_files``: result-scoped staleness info
         """
         s = substring.lower()
-        all_matches = [n for n in self.function_graph.nodes if s in n.lower()]
+        all_matches = [n for n in self._reader.nodes_iter() if s in n.lower()]
         total = len(all_matches)
         results = all_matches[:limit]
         staleness = self._staleness_for(results)
@@ -1182,11 +1278,20 @@ class CallGraphIndex:
 
     def stats(self) -> StatsResult:
         commit = self._commit_staleness()
+        num_modules = len(self._module_index)
+        # Count module-level edges: distinct (src_module, dst_module) pairs from call edges.
+        module_edge_set: set[tuple[str, str]] = set()
+        for sym in self._reader.nodes_iter():
+            src_mod = _module_of(sym)
+            for callee in self._reader.successors(sym, kinds=("call",)):
+                dst_mod = _module_of(callee)
+                if src_mod != dst_mod:
+                    module_edge_set.add((src_mod, dst_mod))
         return StatsResult(
-            functions=self.function_graph.number_of_nodes(),
-            function_edges=self.function_graph.number_of_edges(),
-            modules=self.module_graph.number_of_nodes(),
-            module_edges=self.module_graph.number_of_edges(),
+            functions=self._reader.num_nodes(),
+            function_edges=self._reader.num_edges(kind="call"),
+            modules=num_modules,
+            module_edges=len(module_edge_set),
             **commit,  # type: ignore[arg-type]
         )
 
@@ -1196,21 +1301,22 @@ _MODULE_BFS_CAP = 50
 _IN_DEGREE_THRESHOLD_FLOOR = 10
 
 
-def _compute_in_degree_threshold(fg: _DiGraph) -> int:
-    """Compute the in-degree hub-suppression threshold for *fg*.
+def _compute_in_degree_threshold(reader: GraphReader) -> int:
+    """Compute the in-degree hub-suppression threshold from *reader*.
 
     Returns the p99 of the in-degree distribution across all nodes in the
-    function graph, with a floor of ``_IN_DEGREE_THRESHOLD_FLOOR`` (10).
+    function graph (call edges only), with a floor of
+    ``_IN_DEGREE_THRESHOLD_FLOOR`` (10).
 
     If the graph has fewer than 2 nodes, returns the floor.
 
-    This is called once during ``CallGraphIndex.from_raw`` and the result is
+    This is called once during ``CallGraphIndex.from_nodes`` and the result is
     cached on the index instance as ``_in_degree_threshold``.  Never called
     per-query — see Law 2.
     """
-    if fg.number_of_nodes() < 2:
+    if reader.num_nodes() < 2:
         return _IN_DEGREE_THRESHOLD_FLOOR
-    in_degrees = [len(fg._pred.get(n, ())) for n in fg.nodes]
+    in_degrees = [reader.in_degree(n, kinds=("call",)) for n in reader.nodes_iter()]
     in_degrees.sort()
     n = len(in_degrees)
     # p99 index: the value at the 99th percentile (upper inclusive)
@@ -1226,37 +1332,41 @@ def _module_of(fqn: str) -> str:
 
 
 def _prefix_module_bfs(
-    query_graph: _DiGraph | _DiGraphReverseView,
-    node_graph: _DiGraph,
+    reader: GraphReader,
+    module_index: dict[str, set[str]],
     prefix: str,
     depth: int,
     cap: int = _MODULE_BFS_CAP,
 ) -> dict[str, object]:
-    """BFS over *query_graph* for all nodes in *node_graph* whose FQN starts with *prefix*.
+    """BFS over the function graph for modules whose FQN starts with *prefix*.
 
-    Results from each matched seed node are unioned and deduplicated.  The matched
-    seed nodes themselves are excluded from the result set (same semantics as _bfs).
+    Uses *reader* for function-level traversal and *module_index* to map
+    symbols to their parent modules.  Results from each matched seed module
+    are unioned and deduplicated.  The matched seed modules themselves are
+    excluded from the result set (same semantics as the former _bfs helper).
     Results are capped at *cap*; ``truncated`` reflects whether the full union
-    exceeded the cap.  ``dropped`` is the number of results cut by the cap (always
-    present; 0 when the cap does not fire).
+    exceeded the cap.  ``dropped`` is the number of results cut by the cap.
 
-    When a result node is reachable from multiple seeds, its hop depth is the
-    minimum across all seeds (closest path wins).
+    When a result module is reachable from multiple seeds, its hop depth is
+    the minimum across all seeds (closest path wins).
 
     ``prefix=""`` matches all module nodes.
     """
     # Collect all module nodes that start with the given prefix
-    matched_seeds = [n for n in node_graph.nodes if n.startswith(prefix)]
+    matched_seeds = [mod for mod in module_index if mod.startswith(prefix)]
 
-    # Union BFS results across all matched seeds, excluding the seeds themselves.
-    # Track min hop depth per result node.
     seed_set = set(matched_seeds)
-    union: dict[str, int] = {}  # fqn -> min hop depth
-    for seed in matched_seeds:
-        for node, hop in _bfs(query_graph, seed, depth).items():
-            if node not in seed_set:
-                if node not in union or hop < union[node]:
-                    union[node] = hop
+    union: dict[str, int] = {}  # module_fqn -> min hop depth
+
+    for seed_mod in matched_seeds:
+        # Do a function-level BFS from all symbols in this seed module.
+        for sym in module_index.get(seed_mod, ()):
+            bfs_result = reader.bfs(sym, depth, direction="calls", kinds=("call",))
+            for reachable_fqn, (hop, _) in bfs_result.items():
+                reachable_mod = _module_of(reachable_fqn)
+                if reachable_mod not in seed_set:
+                    if reachable_mod not in union or hop < union[reachable_mod]:
+                        union[reachable_mod] = hop
 
     dropped = max(0, len(union) - cap)
     truncated = dropped > 0
@@ -1265,98 +1375,6 @@ def _prefix_module_bfs(
         "truncated": truncated,
         "dropped": dropped,
     }
-
-
-def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> dict[str, int]:
-    """BFS from *start* up to *depth* hops.
-
-    ``depth=0`` returns ``{}``.  ``depth=1`` returns direct neighbours only.
-    ``depth=N`` returns all nodes reachable within N hops (excluding *start*).
-
-    Returns a ``dict[fqn, min_hop_depth]`` mapping each reachable FQN to its
-    minimum hop distance from *start*.  The traversal set is identical to the
-    previous ``sorted(seen)`` implementation; only ordering and depth metadata
-    are new.
-    """
-    if depth <= 0 or start not in g:
-        return {}
-    seen: dict[str, int] = {}
-    frontier = [start]
-    for hop in range(1, depth + 1):
-        nxt: list[str] = []
-        for n in frontier:
-            for s in g.successors(n):
-                if s not in seen and s != start:
-                    seen[s] = hop
-                    nxt.append(s)
-        frontier = nxt
-    return seen
-
-
-def _bfs_nodes_called_by(
-    nodes: dict[str, dict],
-    start: str,
-    depth: int,
-) -> dict[str, tuple[int, dict[str, int]]]:
-    """BFS over ``nodes[fqn]["called_by"]`` for all reference kinds.
-
-    Used by :meth:`CallGraphIndex.refers_to` with ``kind="all"`` to traverse
-    all typed reference edges (``call``, ``import``, ``except``,
-    ``annotation``, ``isinstance``) stored in the site-keyed nodes dict.
-
-    Unlike :func:`_bfs` (which operates on a :class:`_DiGraph` containing only
-    call edges), this function walks the ``nodes`` dict directly so that
-    non-call edge kinds are included.
-
-    Returns a mapping of
-    ``{referencing_fqn -> (min_hop_depth, {kind -> hop_at_first_seen})}``
-    where ``min_hop_depth`` is the minimum hop at which the FQN was reached
-    across all kinds.  A referencing FQN may appear under multiple kinds;
-    ``min_hop_depth`` is the minimum across them.
-
-    ``depth=0`` returns ``{}``.  ``depth=1`` returns direct references only.
-    ``depth=2`` traverses through call-only edges (``called_by["call"]``) to
-    find hop-2 references.
-    """
-    if depth <= 0 or start not in nodes:
-        return {}
-
-    # seen: referencing_fqn -> (min_hop, {kind: hop_at_first_seen})
-    seen: dict[str, tuple[int, dict[str, int]]] = {}
-
-    # Hop 1: collect all referencing FQNs from nodes[start]["called_by"]
-    hop1_callers: set[str] = set()
-    called_by = nodes[start].get("called_by", {}) or {}
-    for kind, referrers in called_by.items():
-        for ref_fqn in referrers:
-            if ref_fqn == start:
-                continue
-            if ref_fqn not in seen:
-                seen[ref_fqn] = (1, {kind: 1})
-                hop1_callers.add(ref_fqn)
-            else:
-                seen[ref_fqn][1][kind] = 1
-
-    if depth == 1:
-        return seen
-
-    # Hop 2: traverse through call-only edges from hop-1 FQNs
-    # (We follow "who calls the hop-1 referrers" via call edges only —
-    # consistent with the callers_of depth-2 semantics.)
-    for ref_fqn in list(hop1_callers):
-        hop2_called_by = nodes.get(ref_fqn, {}).get("called_by", {}) or {}
-        hop2_callers = hop2_called_by.get("call", [])
-        for h2_fqn in hop2_callers:
-            if h2_fqn == start or h2_fqn in hop1_callers:
-                continue
-            if h2_fqn not in seen:
-                seen[h2_fqn] = (2, {"call": 2})
-            else:
-                cur_hop, cur_kinds = seen[h2_fqn]
-                if cur_hop > 2:
-                    seen[h2_fqn] = (2, {**cur_kinds, "call": 2})
-
-    return seen
 
 
 def _dedup_modules(fqns: list[str]) -> list[str]:
