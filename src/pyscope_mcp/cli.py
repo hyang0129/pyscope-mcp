@@ -122,13 +122,11 @@ def cmd_serve(args: argparse.Namespace) -> int:
     index = _index_path(args.index)
     if not index.is_absolute():
         index = (root / index).resolve()
-    if not index.exists():
-        print(
-            f"[pyscope-mcp] no index at {index}. Run 'pyscope-mcp build' first.",
-            file=sys.stderr,
-        )
-        return 2
 
+    # Do NOT exit early for missing/stale index. Pass the path to run_stdio
+    # unconditionally; it will enter deferred-error mode and keep all tools
+    # registered. This prevents the silent tool-disappearance on stale schema
+    # or first-run before 'pyscope-mcp build' has been executed.
     server.run_stdio(index_path=index)
     return 0
 
