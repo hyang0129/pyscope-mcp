@@ -1130,6 +1130,11 @@ class CallGraphIndex:
         """
         symbol_fqns: list[str] = []
         for mod in module_fqns:
+            if not isinstance(mod, str):
+                raise TypeError(
+                    f"_expand_modules_to_symbols expects str elements, "
+                    f"got {type(mod)!r}: {mod!r}"
+                )
             prefix = mod + "."
             for fqn in self._fqn_to_file:
                 if fqn.startswith(prefix):
