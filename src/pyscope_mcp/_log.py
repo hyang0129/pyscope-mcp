@@ -9,8 +9,7 @@ writes are deferred to a future follow-up.
 
 Configuration (env vars, read at init time):
   PYSCOPE_MCP_LOG      "1" to enable, "0" to disable.
-                       # PRE-RELEASE DEFAULT: flip to off before public release.
-                       Defaults to "1" during pre-release.
+                       Defaults to "0" (off). Set to "1" to enable.
   PYSCOPE_MCP_LOG_PATH Path to the log file.
                        Default: <index_dir>/.pyscope-mcp/query.jsonl
                        (The .pyscope-mcp/ dir is already .gitignored.)
@@ -225,9 +224,9 @@ def init(log_path: Path) -> None:
 def _is_enabled() -> bool:
     """Return True when logging is enabled.
 
-    # PRE-RELEASE DEFAULT: flip to off before public release.
+    Logging is off by default.  Set ``PYSCOPE_MCP_LOG=1`` to enable.
     """
-    return os.environ.get("PYSCOPE_MCP_LOG", "1") not in ("0", "false", "False", "no", "No")
+    return os.environ.get("PYSCOPE_MCP_LOG", "0") not in ("0", "false", "False", "no", "No")
 
 
 def log_call(

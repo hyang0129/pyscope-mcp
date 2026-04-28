@@ -56,11 +56,55 @@ Errors out if no index exists. Env-var equivalents: `PYSCOPE_MCP_ROOT`, `PYSCOPE
 }
 ```
 
+## Setup for an agent in your repo (Claude Code)
+
+If you are an agent setting up `pyscope-mcp` in a new repo, follow these steps:
+
+1. **Install the package**
+
+   ```bash
+   pip install pyscope-mcp
+   ```
+
+2. **Build the call-graph index**
+
+   ```bash
+   pyscope-mcp build --root /abs/path/to/repo --package your_package_name
+   ```
+
+   This writes `.pyscope-mcp/index.json` inside the repo. Run this step first — `serve` will not build the index automatically.
+
+3. **Register the MCP server in `.claude/settings.json`**
+
+   ```json
+   {
+     "mcpServers": {
+       "pyscope": {
+         "command": "pyscope-mcp",
+         "args": ["serve"],
+         "env": {
+           "PYSCOPE_MCP_ROOT": "/abs/path/to/repo"
+         }
+       }
+     }
+   }
+   ```
+
+   If the index lives at a non-default path, add `"PYSCOPE_MCP_INDEX": "/abs/path/to/index.json"` to the `env` block.
+
+4. **Verify the server loaded**
+
+   After restarting Claude Code (or reloading the MCP server), ask Claude:
+
+   > Call the `stats` tool on the pyscope-mcp server.
+
+   You should see node and edge counts in the response. If the output is non-empty the index loaded correctly and the MCP tools are ready to use.
+
 ## Query logging (opt-in)
 
 Every `tools/call` dispatch can append a structured JSONL entry to a local rotating log file so you can measure tool-use patterns, truncation rates, hub-suppression hits, and latency without parsing claude's session transcripts.
 
-**During pre-release the logger is enabled by default** (`PYSCOPE_MCP_LOG=1`). Before the first public release this default will flip to off.
+The logger is **off by default**. Set `PYSCOPE_MCP_LOG=1` to enable.
 
 ### Log location
 
@@ -70,11 +114,11 @@ Override: `PYSCOPE_MCP_LOG_PATH=/abs/path/to/query.jsonl`.
 ### Enable / disable
 
 ```bash
-# Disable
-PYSCOPE_MCP_LOG=0 pyscope-mcp serve ...
-
-# Enable explicitly
+# Enable
 PYSCOPE_MCP_LOG=1 pyscope-mcp serve ...
+
+# Disable explicitly (or leave PYSCOPE_MCP_LOG unset — off is the default)
+PYSCOPE_MCP_LOG=0 pyscope-mcp serve ...
 ```
 
 ### Log entry schema (v1)
