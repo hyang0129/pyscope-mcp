@@ -148,9 +148,11 @@ def reset_server_state(tmp_index: Path):
     import pyscope_mcp.server as srv
     srv._INDEX_PATH = tmp_index
     srv._INDEX = None
+    srv._DEFERRED_ERROR = None
     srv._SERVER._shutdown_requested = False
     yield
     srv._INDEX = None
+    srv._DEFERRED_ERROR = None
 
 
 # ---------------------------------------------------------------------------
@@ -1311,3 +1313,163 @@ def test_no_heavy_deps_on_serve_path():
         f"Heavy deps loaded on serve path: {sorted(intersection)}. "
         "Issue #40 removed these from the serve path — do not reintroduce."
     )
+
+
+# ---------------------------------------------------------------------------
+# Deferred-error state — issue #96
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def server_deferred_missing(tmp_path: Path) -> RpcServer:
+    """Server with _DEFERRED_ERROR set for a missing index."""
+    import pyscope_mcp.server as srv
+
+    missing = tmp_path / "nonexistent" / "index.json"
+    srv._INDEX_PATH = missing
+    srv._INDEX = None
+    srv._DEFERRED_ERROR = (
+        f"Index not found at {missing}. "
+        f"{srv._DEFERRED_ERROR_ACTION}"
+    )
+    return srv._SERVER
+
+
+@pytest.fixture()
+def server_deferred_stale(tmp_path: Path) -> RpcServer:
+    """Server with _DEFERRED_ERROR set simulating a stale-schema error."""
+    import pyscope_mcp.server as srv
+
+    stale = tmp_path / "stale_index.json"
+    stale.write_text("{}")  # file exists but schema is wrong
+    srv._INDEX_PATH = stale
+    srv._INDEX = None
+    srv._DEFERRED_ERROR = (
+        f"Index version mismatch: expected 5, got 0. "
+        f"{srv._DEFERRED_ERROR_ACTION}"
+    )
+    return srv._SERVER
+
+
+@pytest.mark.asyncio
+async def test_deferred_error_tools_list_still_returns_all_tools(
+    server_deferred_missing: RpcServer,
+):
+    """tools/list in deferred-error state must return all 9 tools."""
+    lines = [_req("tools/list", req_id=1)]
+    responses = await _run(server_deferred_missing, lines)
+    tools = responses[0]["result"]["tools"]
+    tool_names = {t["name"] for t in tools}
+    assert len(tools) == 9
+    assert tool_names == {
+        "stats", "reload", "build", "refers_to", "callees_of",
+        "module_callees", "search", "file_skeleton", "neighborhood",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name,arguments", [
+    ("stats",         {}),
+    ("refers_to",     {"fqn": "pkg.mod.foo"}),
+    ("callees_of",    {"fqn": "pkg.mod.foo"}),
+    ("module_callees",{"module": "pkg.mod"}),
+    ("search",        {"query": "foo"}),
+    ("file_skeleton", {"path": "pkg/mod.py"}),
+    ("neighborhood",  {"symbol": "pkg.mod.foo"}),
+])
+async def test_deferred_error_index_tools_return_is_error(
+    server_deferred_missing: RpcServer,
+    tool_name: str,
+    arguments: dict,
+):
+    """Each index-dependent tool in deferred-error state returns isError:true
+    with a message containing 'pyscope-mcp build'."""
+    lines = [_req("tools/call", {"name": tool_name, "arguments": arguments}, req_id=1)]
+    responses = await _run(server_deferred_missing, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is True, f"{tool_name} should return isError:true in deferred-error state"
+    text = r["content"][0]["text"]
+    assert "pyscope-mcp build" in text, (
+        f"{tool_name} error message must contain 'pyscope-mcp build'; got: {text!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_error_stale_schema_message_contains_pyscope_build(
+    server_deferred_stale: RpcServer,
+):
+    """Stale-schema deferred error also produces 'pyscope-mcp build' in the message."""
+    lines = [_req("tools/call", {"name": "stats", "arguments": {}}, req_id=1)]
+    responses = await _run(server_deferred_stale, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is True
+    text = r["content"][0]["text"]
+    assert "pyscope-mcp build" in text
+
+
+@pytest.mark.asyncio
+async def test_deferred_error_reload_with_broken_index_returns_is_error(
+    tmp_index: Path,
+):
+    """reload when the index file has a bad schema returns isError:true; server stays up."""
+    import pyscope_mcp.server as srv
+
+    # Write a broken index (wrong version) to the path
+    bad_index = tmp_index.parent / "bad_index.json"
+    bad_index.write_text('{"version": 0, "root": "/", "raw": {}}')
+
+    srv._INDEX_PATH = bad_index
+    srv._INDEX = None
+    srv._DEFERRED_ERROR = None  # start clean — reload is the trigger here
+
+    lines = [
+        _req("tools/call", {"name": "reload", "arguments": {}}, req_id=1),
+        _req("tools/call", {"name": "stats", "arguments": {}}, req_id=2),
+    ]
+    responses = await _run(srv._SERVER, lines)
+
+    # reload must return isError:true (index still broken)
+    r_reload = responses[0]["result"]
+    assert r_reload["isError"] is True, "reload with broken index must return isError:true"
+    text = r_reload["content"][0]["text"]
+    assert "pyscope-mcp build" in text, (
+        f"reload error message must contain 'pyscope-mcp build'; got: {text!r}"
+    )
+
+    # The subsequent stats call must ALSO return isError:true (deferred-error preserved)
+    r_stats = responses[1]["result"]
+    assert r_stats["isError"] is True, "stats after failed reload must still return isError:true"
+
+
+@pytest.mark.asyncio
+async def test_deferred_error_reload_with_valid_index_clears_error(
+    tmp_index: Path,
+):
+    """reload after a valid index is placed on disk clears _DEFERRED_ERROR."""
+    import pyscope_mcp.server as srv
+
+    # Pre-arm deferred-error state
+    srv._INDEX_PATH = tmp_index
+    srv._INDEX = None
+    srv._DEFERRED_ERROR = f"Index not found at {tmp_index}. {srv._DEFERRED_ERROR_ACTION}"
+
+    lines = [
+        _req("tools/call", {"name": "reload", "arguments": {}}, req_id=1),
+        _req("tools/call", {"name": "stats", "arguments": {}}, req_id=2),
+    ]
+    responses = await _run(srv._SERVER, lines)
+
+    # reload must succeed (tmp_index is valid)
+    r_reload = responses[0]["result"]
+    assert r_reload["isError"] is False, (
+        f"reload with valid index must succeed; got: {r_reload['content'][0]['text']!r}"
+    )
+    payload = json.loads(r_reload["content"][0]["text"])
+    assert "functions" in payload, "reload must return stats payload on success"
+
+    # _DEFERRED_ERROR must now be cleared
+    assert srv._DEFERRED_ERROR is None, "reload success must clear _DEFERRED_ERROR"
+
+    # Subsequent stats call must also succeed
+    r_stats = responses[1]["result"]
+    assert r_stats["isError"] is False, "stats after successful reload must succeed"

@@ -631,6 +631,154 @@ def test_shutdown_then_eof_exits_zero(index_path: Path) -> None:
             proc.wait(timeout=2)
 
 
+def test_deferred_error_stale_schema_e2e(tmp_path: Path) -> None:
+    """E2E (issue #96): serve with a stale-schema index does not crash.
+
+    All 9 tools must appear in tools/list. Index-dependent tool calls must
+    return isError:true with a message containing 'pyscope-mcp build'.
+    The server keeps running for subsequent requests.
+    """
+    # Write a deliberately broken index (wrong version number)
+    stale_dir = tmp_path / ".pyscope-mcp"
+    stale_dir.mkdir(parents=True)
+    stale_index = stale_dir / "index.json"
+    stale_index.write_text('{"version": 0, "root": "/", "raw": {}}')
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "serve",
+            "--root", str(tmp_path),
+            "--index", str(stale_index),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        # Handshake — server must start (not crash)
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-deferred", "version": "0"},
+            },
+        })
+        r1 = _recv(proc)
+        assert r1["id"] == 1
+        assert r1["result"]["serverInfo"]["name"] == "pyscope-mcp"
+
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # tools/list must return all 9 tools (deferred-error does not hide them)
+        _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        r2 = _recv(proc)
+        assert r2["id"] == 2
+        tools = r2["result"]["tools"]
+        assert len(tools) == 9, (
+            f"Expected 9 tools in deferred-error state; got {len(tools)}: "
+            f"{[t['name'] for t in tools]}"
+        )
+
+        # stats must return isError:true with actionable message
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "stats", "arguments": {}},
+        })
+        r3 = _recv(proc)
+        assert r3["id"] == 3
+        assert "error" not in r3, f"Unexpected JSON-RPC error: {r3}"
+        assert r3["result"]["isError"] is True
+        text = r3["result"]["content"][0]["text"]
+        assert "pyscope-mcp build" in text, (
+            f"Error message must contain 'pyscope-mcp build'; got: {text!r}"
+        )
+
+        # Server stays alive — ping works
+        _send(proc, {"jsonrpc": "2.0", "id": 4, "method": "ping"})
+        r4 = _recv(proc)
+        assert r4 == {"jsonrpc": "2.0", "id": 4, "result": {}}
+
+        # Clean shutdown
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r_shutdown = _recv(proc)
+        assert r_shutdown == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
+def test_deferred_error_missing_index_e2e(tmp_path: Path) -> None:
+    """E2E (issue #96): serve with a missing index does not exit with code 2.
+
+    All 9 tools must appear in tools/list. stats returns isError:true.
+    """
+    missing_index = tmp_path / ".pyscope-mcp" / "index.json"
+    # Intentionally do NOT create the file
+
+    repo_root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
+
+    proc = subprocess.Popen(
+        [
+            sys.executable, "-m", "pyscope_mcp.cli", "serve",
+            "--root", str(tmp_path),
+            "--index", str(missing_index),
+        ],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        # Server must start (not exit with code 2 as it previously did)
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "e2e-missing", "version": "0"},
+            },
+        })
+        r1 = _recv(proc)
+        assert r1["id"] == 1
+        assert r1["result"]["serverInfo"]["name"] == "pyscope-mcp"
+
+        _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+        # tools/list must return all 9 tools
+        _send(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        r2 = _recv(proc)
+        assert r2["id"] == 2
+        tools = r2["result"]["tools"]
+        assert len(tools) == 9
+
+        # stats must return isError:true with 'pyscope-mcp build' in the message
+        _send(proc, {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "stats", "arguments": {}},
+        })
+        r3 = _recv(proc)
+        assert r3["id"] == 3
+        assert r3["result"]["isError"] is True
+        text = r3["result"]["content"][0]["text"]
+        assert "pyscope-mcp build" in text
+
+        # Clean shutdown
+        _send(proc, {"jsonrpc": "2.0", "id": 99, "method": "shutdown"})
+        r_shutdown = _recv(proc)
+        assert r_shutdown == {"jsonrpc": "2.0", "id": 99, "result": {}}
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=2)
+
+
 def test_completeness_field_e2e(tmp_path: Path) -> None:
     """E2E: build → serve → callers_of returns completeness='partial' when missed_callers present.
 

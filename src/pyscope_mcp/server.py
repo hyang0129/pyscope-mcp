@@ -39,6 +39,17 @@ logger = logging.getLogger(__name__)
 _INDEX: CallGraphIndex | None = None
 _INDEX_PATH: Path | None = None
 
+# Deferred-error state: set at startup if the index cannot be loaded.
+# All index-dependent tools check this before calling _get_index().
+# Cleared by reload/build on success. Never blocks the tools/list response.
+_DEFERRED_ERROR: str | None = None
+
+# Actionable remedy string appended to all deferred-error messages.
+_DEFERRED_ERROR_ACTION = (
+    "Run 'pyscope-mcp build' to regenerate the index, "
+    "then call the 'reload' MCP tool."
+)
+
 # UUID generated once at module import (= server startup).
 # Since the MCP server is spawned per-session as a stdio subprocess,
 # this naturally partitions log entries by session.
@@ -489,12 +500,22 @@ async def _tools_call(id, params):  # noqa: A002
 
 
 async def _dispatch_tool(name: str, arguments: dict) -> dict:
-    global _INDEX
+    global _INDEX, _DEFERRED_ERROR
 
     if name == "reload":
         if _INDEX_PATH is None:
             raise RuntimeError("server started without an index path")
-        _INDEX = CallGraphIndex.load(_INDEX_PATH)
+        # Harden: if the index is still broken, update deferred-error and keep running.
+        try:
+            _INDEX = CallGraphIndex.load(_INDEX_PATH)
+            _DEFERRED_ERROR = None  # clear on success
+        except (FileNotFoundError, ValueError) as exc:
+            _INDEX = None
+            if isinstance(exc, FileNotFoundError):
+                _DEFERRED_ERROR = f"Index not found at {_INDEX_PATH}. {_DEFERRED_ERROR_ACTION}"
+            else:
+                _DEFERRED_ERROR = f"{exc}. {_DEFERRED_ERROR_ACTION}"
+            return _error_result(_DEFERRED_ERROR)
         return _text(_INDEX.stats())
 
     if name == "build":
@@ -519,9 +540,14 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
                 return _error_result(
                     f"build failed (exit {proc_result.returncode}): {stderr}"
                 )
-            # Reload the freshly-written index
+            # Reload the freshly-written index; clear deferred-error on success.
             _INDEX = CallGraphIndex.load(_INDEX_PATH)
+            _DEFERRED_ERROR = None
             return _text(_INDEX.stats())
+
+    # Gate all index-dependent tools: return actionable error if startup load failed.
+    if _DEFERRED_ERROR:
+        return _error_result(_DEFERRED_ERROR)
 
     idx = _get_index()
 
@@ -594,10 +620,32 @@ async def _dispatch_tool(name: str, arguments: dict) -> dict:
 # Public entry point
 # ---------------------------------------------------------------------------
 def run_stdio(index_path: Path) -> None:
-    """Load the index and start the JSON-RPC stdio loop (blocks until EOF/shutdown)."""
-    global _INDEX_PATH, _INDEX
+    """Load the index and start the JSON-RPC stdio loop (blocks until EOF/shutdown).
+
+    If the index file is missing or has a stale schema, the load error is captured
+    in _DEFERRED_ERROR instead of crashing. All tools are still registered and visible
+    via tools/list. Index-dependent tool calls return isError:true with an actionable
+    message until a valid index is available.
+    """
+    global _INDEX_PATH, _INDEX, _DEFERRED_ERROR
     _INDEX_PATH = Path(index_path)
-    _INDEX = CallGraphIndex.load(_INDEX_PATH)
+    try:
+        _INDEX = CallGraphIndex.load(_INDEX_PATH)
+        _DEFERRED_ERROR = None
+    except FileNotFoundError:
+        logger.warning(
+            "Index not found at %s — starting in deferred-error mode. %s",
+            _INDEX_PATH, _DEFERRED_ERROR_ACTION,
+        )
+        _INDEX = None
+        _DEFERRED_ERROR = f"Index not found at {_INDEX_PATH}. {_DEFERRED_ERROR_ACTION}"
+    except ValueError as exc:
+        logger.warning(
+            "Index load failed (%s) — starting in deferred-error mode. %s",
+            exc, _DEFERRED_ERROR_ACTION,
+        )
+        _INDEX = None
+        _DEFERRED_ERROR = f"{exc}. {_DEFERRED_ERROR_ACTION}"
 
     # Initialise query logger (no-op when PYSCOPE_MCP_LOG=0).
     from pyscope_mcp import _log
