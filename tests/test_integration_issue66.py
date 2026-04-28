@@ -26,7 +26,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -219,20 +218,22 @@ class TestBuildToolWiring:
 
     @pytest.mark.integration_wiring
     def test_build_tool_missing_env_returns_error(self, built_index) -> None:
-        """[wiring] build tool fails gracefully when pyscope-mcp binary not on PATH.
+        """[wiring] build tool fails gracefully when the build subprocess exits non-zero.
 
-        Serves with a PATH that lacks the pyscope-mcp entry point; the tool
-        must return isError:true (not a JSON-RPC error, not a server crash).
+        Points PYSCOPE_MCP_INDEX at an unwritable path so the build subprocess
+        fails with a PermissionError. The tool must return isError:true (not a
+        JSON-RPC error, not a server crash).
         """
         index_file, pkg_root, repo_root, env = built_index
 
-        # Strip pyscope-mcp from PATH by removing the venv bin directory
-        venv_bin = str(Path(sys.executable).parent)
-        broken_path = ":".join(
-            p for p in env.get("PATH", "").split(":")
-            if p != venv_bin and "pyscope" not in p.lower()
-        )
-        broken_env = dict(env, PATH=broken_path)
+        # Point the index at a path whose parent dir cannot be created — the
+        # build subprocess will exit 1 with a PermissionError on mkdir.
+        # Also pin PYSCOPE_MCP_ROOT to the small fixture package so the
+        # subprocess doesn't scan the entire repo before hitting the error.
+        broken_env = dict(env,
+                          PYSCOPE_MCP_ROOT=str(pkg_root),
+                          PYSCOPE_MCP_PACKAGE="mypkg",
+                          PYSCOPE_MCP_INDEX="/nonexistent_ro_dir/index.json")
 
         proc = subprocess.Popen(
             [
@@ -258,9 +259,9 @@ class TestBuildToolWiring:
                 f"got JSON-RPC error instead of isError:true — {r}"
             )
 
-            # [Assert] isError:true when subprocess unavailable
+            # [Assert] isError:true when build subprocess fails
             assert r["result"]["isError"] is True, (
-                "build with missing binary must return isError:true"
+                "build with failing subprocess must return isError:true"
             )
 
             _shutdown(proc)
@@ -339,7 +340,7 @@ class TestCommitStalenessQueryWiring:
 
     @pytest.mark.integration_wiring
     def test_callers_of_response_has_commit_staleness_fields(self, built_index) -> None:
-        """[wiring] callers_of response includes commit staleness keys over real stdio-RPC."""
+        """[wiring] refers_to response includes commit staleness keys over real stdio-RPC."""
         index_file, pkg_root, _, _ = built_index
         proc = _spawn_server(index_file, root=pkg_root)
         try:
@@ -347,7 +348,7 @@ class TestCommitStalenessQueryWiring:
 
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.alpha"}},
+                "params": {"name": "refers_to", "arguments": {"fqn": "mypkg.core.alpha", "kind": "callers"}},
             })
             r = _recv(proc)
             assert r["id"] == 2
@@ -358,7 +359,7 @@ class TestCommitStalenessQueryWiring:
 
             # [Assert] Commit staleness keys present
             assert "commit_stale" in body, (
-                "callers_of response must include 'commit_stale' over the wire"
+                "refers_to response must include 'commit_stale' over the wire"
             )
             assert "index_git_sha" in body
             assert "head_git_sha" in body

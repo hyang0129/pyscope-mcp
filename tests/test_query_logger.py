@@ -16,7 +16,6 @@ Test scenarios per the refined spec:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -149,23 +148,23 @@ def _read_log(log_path: Path) -> list[dict]:
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(l) for l in lines if l.strip()]
+    return [json.loads(line) for line in lines if line.strip()]
 
 
 # ---------------------------------------------------------------------------
-# S1 — happy-path tool call (callers_of)
+# S1 — happy-path tool call (refers_to)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_s1_happy_path_callers_of(server: RpcServer, tmp_index: Path, log_path: Path):
-    """S1: callers_of call appends one valid JSONL entry."""
+    """S1: refers_to call appends one valid JSONL entry."""
     import pyscope_mcp.server as srv
     srv._INDEX = CallGraphIndex.load(tmp_index)
 
     _init_logger(log_path)
 
     lines = [
-        _req("tools/call", {"name": "callers_of", "arguments": {"fqn": "pkg.mod.bar"}}, req_id=7),
+        _req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers"}}, req_id=7),
     ]
     responses = await _run(server, lines)
 
@@ -181,7 +180,7 @@ async def test_s1_happy_path_callers_of(server: RpcServer, tmp_index: Path, log_
     assert e["ts"]  # non-empty ISO string
     assert e["server_id"]  # non-empty UUID string
     assert e["rpc_id"] == 7
-    assert e["tool"] == "callers_of"
+    assert e["tool"] == "refers_to"
     assert "fqn" in e["args"]
     assert isinstance(e["duration_ms"], int) and e["duration_ms"] >= 0
     assert e["is_error"] is False
@@ -318,7 +317,7 @@ async def test_s4_opt_out_no_file_created(server: RpcServer, tmp_index: Path, lo
 
 def test_s5_log_rotation(tmp_path: Path):
     """S5: rotation at LOG_MAX_BYTES, max LOG_BACKUP_COUNT historical files."""
-    from pyscope_mcp._log import LOG_BACKUP_COUNT, LOG_MAX_BYTES, QueryLogger
+    from pyscope_mcp._log import LOG_MAX_BYTES, QueryLogger
 
     log_path = tmp_path / "query.jsonl"
     ql = QueryLogger(log_path)

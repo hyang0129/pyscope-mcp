@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pyscope_mcp.graph import CallGraphIndex
+import pytest
+
+from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
 from conftest import make_nodes
 
 
@@ -25,7 +27,7 @@ def test_from_raw_builds_graphs() -> None:
 
 def test_queries() -> None:
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
-    # callers_of / callees_of now return dict shapes
+    # callees_of returns dict shape
     callees = idx.callees_of("sample.a.top", depth=1)
     assert isinstance(callees, dict)
     assert "results" in callees
@@ -35,11 +37,14 @@ def test_queries() -> None:
     callees_deep = idx.callees_of("sample.a.top", depth=2)
     assert "sample.b.inner" in callees_deep["results"]
 
-    callers = idx.callers_of("sample.b.helper", depth=1)
+    # refers_to(kind="callers") replaces callers_of
+    callers = idx.refers_to("sample.b.helper", kind="callers", depth=1)
     assert isinstance(callers, dict)
     assert "results" in callers
     assert "truncated" in callers
-    assert "sample.a.top" in callers["results"]
+    # function granularity returns entries with fqn field
+    fqns = [e["fqn"] for e in callers["results"]]
+    assert "sample.a.top" in fqns
 
     result = idx.search("helper")
     assert result["results"] == ["sample.b.helper"]
@@ -92,15 +97,14 @@ def _prefix_raw() -> dict[str, list[str]]:
 
 
 def test_module_callers_prefix_match() -> None:
-    """module_callers with a prefix returns callers of all matched modules."""
+    """refers_to(kind="callers", granularity="module") with a prefix returns callers of all matched modules."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_prefix_raw()))
-    result = idx.module_callers("pkg.agents")
+    result = idx.refers_to("pkg.agents.writer.write", kind="callers", granularity="module")
     assert result["truncated"] is False
-    # pkg.core calls into pkg.agents.writer and pkg.agents.reader
+    # pkg.core calls into pkg.agents.writer.write
     assert "pkg.core" in result["results"]
     # The matched seeds themselves must NOT appear in results
     assert "pkg.agents.writer" not in result["results"]
-    assert "pkg.agents.reader" not in result["results"]
 
 
 def test_module_callees_prefix_match() -> None:
@@ -114,9 +118,9 @@ def test_module_callees_prefix_match() -> None:
 
 
 def test_module_callers_exact_match_backward_compat() -> None:
-    """An exact FQN returns the same callers as before, now in structured form."""
+    """An exact FQN via refers_to(kind='callers', granularity='module') returns structured form."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_prefix_raw()))
-    result = idx.module_callers("pkg.agents.writer")
+    result = idx.refers_to("pkg.agents.writer.write", kind="callers", granularity="module")
     assert isinstance(result, dict)
     assert "results" in result
     assert "truncated" in result
@@ -125,12 +129,12 @@ def test_module_callers_exact_match_backward_compat() -> None:
 
 
 def test_module_callers_no_match() -> None:
-    """A prefix matching no module nodes returns empty results, no error."""
+    """A nonexistent FQN via refers_to returns fqn_not_in_graph error."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_prefix_raw()))
-    result = idx.module_callers("nonexistent.pkg")
-    assert result["results"] == []
-    assert result["truncated"] is False
-    assert "stale" in result  # staleness fields always present
+    result = idx.refers_to("nonexistent.pkg.fn", kind="callers", granularity="module")
+    # nonexistent FQN → isError
+    assert result.get("isError") is True
+    assert result["error_reason"] == "fqn_not_in_graph"
 
 
 def test_module_callees_no_match() -> None:
@@ -143,11 +147,10 @@ def test_module_callees_no_match() -> None:
 
 
 def test_module_callers_empty_prefix() -> None:
-    """Empty-string prefix matches all modules; returns structured dict with no error."""
+    """refers_to with a function FQN that has no callers returns empty results."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_prefix_raw()))
-    result = idx.module_callers("")
-    # All modules are seeds — callers within the same set are excluded.
-    # The important invariants are shape and no error.
+    # pkg.io.disk.save has no callers in the call graph
+    result = idx.refers_to("pkg.io.disk.save", kind="callers", granularity="module")
     assert isinstance(result, dict)
     assert "results" in result
     assert "truncated" in result
@@ -168,13 +171,13 @@ def test_module_callees_empty_prefix() -> None:
 
 def test_module_callers_truncation() -> None:
     """When more than 50 distinct callers exist, truncated=True and len==50."""
-    # Build a graph where one "target" module has 60 distinct callers
+    # Build a graph where one "target" function has 60 distinct callers
     raw: dict[str, list[str]] = {}
     for i in range(60):
         raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
     raw["target.core.fn"] = []
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(raw))
-    result = idx.module_callers("target")
+    result = idx.refers_to("target.core.fn", kind="callers", granularity="module")
     assert result["truncated"] is True
     assert len(result["results"]) == 50
 
@@ -218,19 +221,24 @@ def test_search_truncation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# callers_of / callees_of — dict shape
+# refers_to — replaces callers_of / module_callers
 # ---------------------------------------------------------------------------
 
-def test_callers_of_returns_dict() -> None:
-    """callers_of returns {results: list[str], truncated: bool}, not a bare list."""
+def test_refers_to_callers_returns_dict() -> None:
+    """refers_to(kind='callers') returns {results: list[{fqn,context,depth}], truncated: bool}."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
-    result = idx.callers_of("sample.b.helper", depth=1)
+    result = idx.refers_to("sample.b.helper", kind="callers", depth=1)
     assert isinstance(result, dict)
     assert "results" in result
     assert "truncated" in result
     assert isinstance(result["results"], list)
     assert isinstance(result["truncated"], bool)
-    assert "sample.a.top" in result["results"]
+    fqns = [e["fqn"] for e in result["results"]]
+    assert "sample.a.top" in fqns
+    # All contexts should be "call" for kind="callers"
+    for entry in result["results"]:
+        assert entry["context"] == "call"
+        assert "depth" in entry
 
 
 def test_callees_of_returns_dict() -> None:
@@ -245,15 +253,15 @@ def test_callees_of_returns_dict() -> None:
     assert "sample.b.helper" in result["results"]
 
 
-def test_callers_of_truncation() -> None:
-    """callers_of caps at 50 and sets truncated=True when exceeded."""
+def test_refers_to_truncation() -> None:
+    """refers_to caps at 50 and sets truncated=True when exceeded."""
     # Build a raw graph where one function has 60 distinct callers
     raw: dict[str, list[str]] = {}
     for i in range(60):
         raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
     raw["target.core.fn"] = []
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(raw))
-    result = idx.callers_of("target.core.fn", depth=1)
+    result = idx.refers_to("target.core.fn", kind="callers", depth=1)
     assert result["truncated"] is True
     assert len(result["results"]) == 50
 
@@ -272,13 +280,13 @@ def test_callees_of_truncation() -> None:
 
 
 # ---------------------------------------------------------------------------
-# dropped field — callers_of / callees_of
+# dropped field — refers_to / callees_of
 # ---------------------------------------------------------------------------
 
-def test_callers_of_dropped_zero_when_not_truncated() -> None:
+def test_refers_to_dropped_zero_when_not_truncated() -> None:
     """dropped=0 when results fit within cap."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
-    result = idx.callers_of("sample.b.helper", depth=1)
+    result = idx.refers_to("sample.b.helper", kind="callers", depth=1)
     assert "dropped" in result
     assert result["dropped"] == 0
     assert result["truncated"] is False
@@ -293,14 +301,14 @@ def test_callees_of_dropped_zero_when_not_truncated() -> None:
     assert result["truncated"] is False
 
 
-def test_callers_of_dropped_correct_when_truncated() -> None:
+def test_refers_to_dropped_correct_when_truncated() -> None:
     """dropped equals the number of results beyond the 50-item cap."""
     raw: dict[str, list[str]] = {}
     for i in range(57):
         raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
     raw["target.core.fn"] = []
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(raw))
-    result = idx.callers_of("target.core.fn", depth=1)
+    result = idx.refers_to("target.core.fn", kind="callers", depth=1)
     assert result["truncated"] is True
     assert len(result["results"]) == 50
     assert result["dropped"] == 7
@@ -346,26 +354,27 @@ def _ranking_raw_callers() -> dict[str, list[str]]:
     return raw
 
 
-def test_callers_of_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
+def test_refers_to_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
     """Depth-1 callers appear before depth-2 callers in results, even when alphabetically later."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_ranking_raw_callers()))
-    result = idx.callers_of("target.fn", depth=2)
+    result = idx.refers_to("target.fn", kind="callers", depth=2)
+    fqns = [e["fqn"] for e in result["results"]]
 
     # depth-1 callers must be present despite sorting alphabetically after a_depth2 nodes
-    assert "z_depth1.mod.fn" in result["results"], (
+    assert "z_depth1.mod.fn" in fqns, (
         "depth-1 caller z_depth1.mod.fn absent — cap dropped it before depth-2 entries"
     )
-    assert "y_depth1.mod.fn" in result["results"], (
+    assert "y_depth1.mod.fn" in fqns, (
         "depth-1 caller y_depth1.mod.fn absent — cap dropped it before depth-2 entries"
     )
 
     # depth-1 callers must appear in the first part of the list
-    z_idx = result["results"].index("z_depth1.mod.fn")
-    y_idx = result["results"].index("y_depth1.mod.fn")
+    z_idx = fqns.index("z_depth1.mod.fn")
+    y_idx = fqns.index("y_depth1.mod.fn")
     # All depth-2 nodes that appear must come after both depth-1 callers
-    for item in result["results"]:
+    for item in fqns:
         if item.startswith("a_depth2"):
-            item_idx = result["results"].index(item)
+            item_idx = fqns.index(item)
             assert item_idx > z_idx and item_idx > y_idx, (
                 f"depth-2 caller {item!r} at index {item_idx} appears before depth-1 callers"
             )
@@ -420,13 +429,13 @@ def test_callees_of_depth1_precede_depth2_when_alphabetical_would_invert() -> No
 
 
 # ---------------------------------------------------------------------------
-# dropped field — module_callers / module_callees
+# dropped field — module_callees
 # ---------------------------------------------------------------------------
 
 def test_module_callers_dropped_zero_when_not_truncated() -> None:
-    """module_callers: dropped=0 when results fit within cap."""
+    """refers_to(kind='callers', granularity='module'): dropped=0 when results fit within cap."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_prefix_raw()))
-    result = idx.module_callers("pkg.agents")
+    result = idx.refers_to("pkg.agents.writer.write", kind="callers", granularity="module")
     assert "dropped" in result
     assert result["dropped"] == 0
     assert result["truncated"] is False
@@ -442,13 +451,13 @@ def test_module_callees_dropped_zero_when_not_truncated() -> None:
 
 
 def test_module_callers_dropped_correct_when_truncated() -> None:
-    """module_callers: dropped equals number of results beyond cap."""
+    """refers_to(kind='callers', granularity='module'): dropped equals number of results beyond cap."""
     raw: dict[str, list[str]] = {}
     for i in range(57):
         raw[f"callers.mod{i}.fn"] = ["target.core.fn"]
     raw["target.core.fn"] = []
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(raw))
-    result = idx.module_callers("target")
+    result = idx.refers_to("target.core.fn", kind="callers", granularity="module")
     assert result["truncated"] is True
     assert len(result["results"]) == 50
     assert result["dropped"] == 7
@@ -469,7 +478,7 @@ def test_module_callees_dropped_correct_when_truncated() -> None:
 
 
 def test_module_callers_depth1_precede_depth2_when_alphabetical_would_invert() -> None:
-    """Depth-1 module callers appear before depth-2 ones, even when alphabetically later."""
+    """Depth-1 refers_to(kind='callers', granularity='module') appear before depth-2 ones."""
     raw: dict[str, list[str]] = {}
     # depth-2 module callers: a_depth2.modN.fn → bridge.mod.fn → target.fn
     for i in range(55):
@@ -480,7 +489,7 @@ def test_module_callers_depth1_precede_depth2_when_alphabetical_would_invert() -
     raw["y_depth1.mod.fn"] = ["target.fn"]
     raw["target.fn"] = []
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(raw))
-    result = idx.module_callers("target", depth=2)
+    result = idx.refers_to("target.fn", kind="callers", granularity="module", depth=2)
 
     assert "z_depth1.mod" in result["results"], (
         "depth-1 module caller z_depth1.mod absent — ranking failed"
@@ -494,18 +503,26 @@ def test_module_callers_depth1_precede_depth2_when_alphabetical_would_invert() -
 
 
 # ---------------------------------------------------------------------------
-# callers_of / callees_of — not-found error shape
+# refers_to / callees_of — not-found error shape
 # ---------------------------------------------------------------------------
 
-def test_callers_of_fqn_not_in_graph() -> None:
-    """callers_of with a nonexistent FQN returns isError:true, error_reason:'fqn_not_in_graph', stale:false."""
+def test_refers_to_fqn_not_in_graph() -> None:
+    """refers_to with a nonexistent FQN returns isError:true, error_reason:'fqn_not_in_graph', stale:false."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
-    result = idx.callers_of("no.such.fqn")
+    result = idx.refers_to("no.such.fqn")
     assert result["isError"] is True
     assert result["error_reason"] == "fqn_not_in_graph"
     assert result["stale"] is False
     assert result["stale_files"] == []
     assert "stale_action" not in result
+
+
+def test_refers_to_depth_exceeds_max() -> None:
+    """refers_to with depth > 2 returns isError:true, error_reason:'depth_exceeds_max'."""
+    idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
+    result = idx.refers_to("sample.b.helper", depth=3)
+    assert result["isError"] is True
+    assert result["error_reason"] == "depth_exceeds_max"
 
 
 def test_callees_of_fqn_not_in_graph() -> None:
@@ -519,11 +536,11 @@ def test_callees_of_fqn_not_in_graph() -> None:
     assert "stale_action" not in result
 
 
-def test_callers_of_known_zero_callers() -> None:
-    """callers_of on an FQN with no callers returns results:[], not an error."""
+def test_refers_to_known_zero_callers() -> None:
+    """refers_to on an FQN with no callers returns results:[], not an error."""
     idx = CallGraphIndex.from_nodes("/tmp/sample", make_nodes(_sample_raw()))
     # sample.a.top has no callers
-    result = idx.callers_of("sample.a.top")
+    result = idx.refers_to("sample.a.top", kind="callers")
     assert result.get("isError") is not True
     assert result["results"] == []
     # Not a not-found error; staleness value depends on test fixture setup
@@ -804,7 +821,7 @@ def test_hub_threshold_attribute_reflects_distribution() -> None:
     """_in_degree_threshold reflects actual p99 when distribution exceeds floor."""
     # Build a graph where one node has very high in-degree (25 callers)
     # p99 of [0]*N_nodes + [25] will be 25 for large enough N
-    raw: dict[str, list[str]] = {"hub.node": []}
+    raw: dict[str, int] = {"hub.node": []}
     for i in range(100):
         raw[f"caller_{i}"] = ["hub.node"]
     idx = CallGraphIndex.from_nodes("/tmp/p99test", make_nodes(raw))
@@ -844,11 +861,6 @@ def test_neighborhood_hub_fields_always_present_isolated() -> None:
 #   4. Deterministic JSON serialisation across insertion orders
 # ---------------------------------------------------------------------------
 
-import pytest
-
-from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
-
-
 def _sample_nodes() -> dict[str, dict]:
     return {
         "pkg.mod.foo": {
@@ -878,9 +890,9 @@ def test_load_version_5_roundtrip(tmp_path: Path) -> None:
     # Forward edge available via callees_of
     callees = loaded.callees_of("pkg.mod.foo", depth=1)
     assert callees["results"] == ["pkg.mod.bar"]
-    # Reverse edge available via callers_of (rebuilt _DiGraph._pred)
-    callers = loaded.callers_of("pkg.mod.bar", depth=1)
-    assert callers["results"] == ["pkg.mod.foo"]
+    # Reverse edge available via refers_to(kind="callers")
+    callers = loaded.refers_to("pkg.mod.bar", kind="callers", depth=1)
+    assert [e["fqn"] for e in callers["results"]] == ["pkg.mod.foo"]
 
 
 def test_load_legacy_v5_raw_payload_raises(tmp_path: Path) -> None:
@@ -956,9 +968,9 @@ def test_from_raw_delegates_to_from_nodes(tmp_path: Path) -> None:
     # Forward edges visible
     callees = idx.callees_of("pkg.mod.foo", depth=1)
     assert callees["results"] == ["pkg.mod.bar"]
-    # Reverse edges visible (build-time inversion happened in _raw_to_nodes)
-    callers = idx.callers_of("pkg.mod.bar", depth=1)
-    assert callers["results"] == ["pkg.mod.foo"]
+    # Reverse edges visible via refers_to
+    callers = idx.refers_to("pkg.mod.bar", kind="callers", depth=1)
+    assert [e["fqn"] for e in callers["results"]] == ["pkg.mod.foo"]
     # ``raw`` property projects nodes → raw shape
     assert idx.raw == {"pkg.mod.foo": ["pkg.mod.bar"]}
 
@@ -1063,7 +1075,7 @@ def test_per_kind_isolation_call_edges_survive_missing_import_bucket(
 ) -> None:
     """Simulate a visitor failure on the import kind (no import bucket
     populated) and assert that call edges from the same caller remain
-    visible through ``callers_of`` / ``callees_of`` and the ``nodes`` map.
+    visible through ``refers_to`` / ``callees_of`` and the ``nodes`` map.
 
     Per-kind isolation is enforced inside the visitor (each ``visit_*``
     wraps its body in try/except + ``_warn_kind_failure``).  This test
@@ -1114,5 +1126,6 @@ def test_per_kind_isolation_call_edges_survive_missing_import_bucket(
     assert other_calls.get("call") == ["pkg.helpers.helper_a"]
     assert other_calls.get("import") == ["json"]
     # Reverse view also intact for the unaffected kinds.
-    a_callers = idx.callers_of("pkg.helpers.helper_a", depth=1)
-    assert sorted(a_callers["results"]) == ["pkg.mod.caller", "pkg.other.caller"]
+    a_callers = idx.refers_to("pkg.helpers.helper_a", kind="callers", depth=1)
+    caller_fqns = sorted(e["fqn"] for e in a_callers["results"])
+    assert caller_fqns == ["pkg.mod.caller", "pkg.other.caller"]

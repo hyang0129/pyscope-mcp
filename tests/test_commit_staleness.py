@@ -13,7 +13,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -133,7 +132,7 @@ def _make_idx_with_raw(tmp_path: Path, git_sha: str = _MOCK_INDEX_SHA) -> CallGr
 def test_callers_of_includes_commit_staleness(tmp_path: Path) -> None:
     idx = _make_idx_with_raw(tmp_path, git_sha=_MOCK_INDEX_SHA)
     with patch("subprocess.run", return_value=_mock_git_success(_MOCK_HEAD)):
-        result = idx.callers_of("pkg.mod.fn_b", depth=1)
+        result = idx.refers_to("pkg.mod.fn_b", kind="callers", depth=1)
     assert "commit_stale" in result
     assert "index_git_sha" in result
     assert "head_git_sha" in result
@@ -186,7 +185,7 @@ def test_neighborhood_includes_commit_staleness(tmp_path: Path) -> None:
 def test_module_callers_includes_commit_staleness(tmp_path: Path) -> None:
     idx = _make_idx_with_raw(tmp_path, git_sha=_MOCK_INDEX_SHA)
     with patch("subprocess.run", return_value=_mock_git_success(_MOCK_HEAD)):
-        result = idx.module_callers("pkg.mod", depth=1)
+        result = idx.refers_to("pkg.mod.fn_b", kind="callers", granularity="module", depth=1)
     assert "commit_stale" in result
 
 
@@ -259,7 +258,6 @@ async def test_build_tool_success(server_with_index, tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_build_tool_concurrent_rejection(server_with_index) -> None:
     """Concurrent build calls: second call returns isError:true immediately."""
-    import asyncio
     srv, _ = server_with_index
     srv._BUILD_LOCK = None  # ensure fresh lock
 

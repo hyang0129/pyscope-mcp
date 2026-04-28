@@ -179,8 +179,8 @@ async def test_golden_handshake(server: RpcServer, tmp_index: Path):
     assert list_resp["id"] == 2
     tools = list_resp["result"]["tools"]
     tool_names = {t["name"] for t in tools}
-    assert tool_names == {"stats", "reload", "build", "callers_of", "callees_of", "module_callers", "module_callees", "search", "file_skeleton", "neighborhood"}
-    assert len(tools) == 10
+    assert tool_names == {"stats", "reload", "build", "refers_to", "callees_of", "module_callees", "search", "file_skeleton", "neighborhood"}
+    assert len(tools) == 9
 
 
 @pytest.mark.asyncio
@@ -190,7 +190,7 @@ async def test_tool_annotations(server: RpcServer):
     responses = await _run(server, lines)
     tools = {t["name"]: t for t in responses[0]["result"]["tools"]}
 
-    for name in ("stats", "callers_of", "callees_of", "module_callers", "module_callees", "search"):
+    for name in ("stats", "refers_to", "callees_of", "module_callees", "search"):
         ann = tools[name]["annotations"]
         assert ann["readOnlyHint"] is True, f"{name} should be readOnly"
         assert ann["idempotentHint"] is True
@@ -220,18 +220,59 @@ async def test_tool_stats(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_tool_callers_of(server: RpcServer):
-    lines = [_req("tools/call", {"name": "callers_of", "arguments": {"fqn": "pkg.mod.bar"}}, req_id=1)]
+async def test_tool_refers_to(server: RpcServer):
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar"}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
     payload = json.loads(r["content"][0]["text"])
-    # Must return dict shape, not bare list
-    assert isinstance(payload, dict), "callers_of must return a dict, not a bare list"
+    # Must return dict shape with results list
+    assert isinstance(payload, dict), "refers_to must return a dict"
     assert "results" in payload
     assert "truncated" in payload
     assert isinstance(payload["results"], list)
     assert isinstance(payload["truncated"], bool)
+
+
+@pytest.mark.asyncio
+async def test_tool_refers_to_kind_callers(server: RpcServer):
+    """refers_to with kind='callers' returns call-only entries with context='call'."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "results" in payload
+    # Each entry has fqn, context, depth
+    for entry in payload["results"]:
+        assert "fqn" in entry
+        assert entry["context"] == "call"
+        assert "depth" in entry
+
+
+@pytest.mark.asyncio
+async def test_tool_refers_to_granularity_module(server: RpcServer):
+    """refers_to with granularity='module' returns flat list of module FQN strings."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "granularity": "module"}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is False
+    payload = json.loads(r["content"][0]["text"])
+    assert "results" in payload
+    # Results should be strings (module FQNs), not dicts
+    for item in payload["results"]:
+        assert isinstance(item, str)
+
+
+@pytest.mark.asyncio
+async def test_tool_refers_to_depth_exceeds_max(server: RpcServer):
+    """refers_to with depth > 2 returns isError:true with depth_exceeds_max."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "depth": 3}}, req_id=1)]
+    responses = await _run(server, lines)
+    r = responses[0]["result"]
+    assert r["isError"] is True
+    text = r["content"][0]["text"]
+    assert "depth_exceeds_max" in text
 
 
 @pytest.mark.asyncio
@@ -250,8 +291,9 @@ async def test_tool_callees_of(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_tool_module_callers(server: RpcServer):
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "pkg.mod"}}, req_id=1)]
+async def test_tool_module_callers_via_refers_to(server: RpcServer):
+    """refers_to(kind='callers', granularity='module') replaces module_callers."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers", "granularity": "module"}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
@@ -276,11 +318,11 @@ async def test_tool_module_callees(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_tool_module_callers_prefix(server: RpcServer):
-    """module_callers with a package prefix returns aggregated callers as {results, truncated}."""
+async def test_tool_refers_to_module_finds_callers(server: RpcServer):
+    """refers_to(kind='callers', granularity='module') on pkg.mod.bar finds pkg.other as caller module."""
     # The fixture has: pkg.mod.foo, pkg.mod.bar, pkg.other.baz
     # pkg.other calls into pkg.mod (pkg.other.baz → pkg.mod.foo)
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "pkg.mod"}}, req_id=1)]
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.foo", "kind": "callers", "granularity": "module"}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
@@ -300,41 +342,30 @@ async def test_tool_module_callees_prefix(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_tool_module_callers_empty_prefix(server: RpcServer):
-    """Empty-string prefix is valid — matches all modules; payload has truncated key."""
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": ""}}, req_id=1)]
+async def test_tool_refers_to_fqn_not_found(server: RpcServer):
+    """refers_to with nonexistent FQN returns fqn_not_in_graph error."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "does.not.exist.fn"}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]["result"]
-    assert r["isError"] is False
+    assert r["isError"] is True
     payload = json.loads(r["content"][0]["text"])
-    assert "results" in payload
-    assert "truncated" in payload
-
-
-@pytest.mark.asyncio
-async def test_tool_module_callers_no_match(server: RpcServer):
-    """A prefix matching no module returns {results: [], truncated: false} — no error."""
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "does.not.exist"}}, req_id=1)]
-    responses = await _run(server, lines)
-    r = responses[0]["result"]
-    assert r["isError"] is False
-    payload = json.loads(r["content"][0]["text"])
-    assert payload["results"] == []
-    assert payload["truncated"] is False
+    assert payload["error_reason"] == "fqn_not_in_graph"
 
 
 @pytest.mark.asyncio
 async def test_tool_descriptions_mention_prefix(server: RpcServer):
-    """module_callers and module_callees tool descriptions document prefix semantics."""
+    """refers_to and module_callees tool descriptions document semantics."""
     lines = [_req("tools/list", req_id=1)]
     responses = await _run(server, lines)
     tools = {t["name"]: t for t in responses[0]["result"]["tools"]}
 
-    mc_desc = tools["module_callers"]["description"]
+    rt_desc = tools["refers_to"]["description"]
     mce_desc = tools["module_callees"]["description"]
 
-    assert "prefix" in mc_desc.lower(), "module_callers description must mention 'prefix'"
-    assert "truncated" in mc_desc.lower(), "module_callers description must mention truncation"
+    assert "refers_to" in rt_desc.lower() or "reference" in rt_desc.lower(), (
+        "refers_to description must describe its purpose"
+    )
+    assert "truncated" in rt_desc.lower(), "refers_to description must mention truncation"
     assert "prefix" in mce_desc.lower(), "module_callees description must mention 'prefix'"
     assert "truncated" in mce_desc.lower(), "module_callees description must mention truncation"
 
@@ -398,9 +429,9 @@ async def test_tool_reload(server: RpcServer):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_callers_of_missing_fqn(server: RpcServer):
+async def test_refers_to_missing_fqn(server: RpcServer):
     """Missing required 'fqn' returns isError:true, not a JSON-RPC error."""
-    lines = [_req("tools/call", {"name": "callers_of", "arguments": {}}, req_id=1)]
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {}}, req_id=1)]
     responses = await _run(server, lines)
     r = responses[0]
     # Should be a successful RPC response with isError=true
@@ -423,9 +454,9 @@ async def test_search_missing_query(server: RpcServer):
 
 
 @pytest.mark.asyncio
-async def test_module_callers_missing_module(server: RpcServer):
-    """Missing required 'module' returns isError:true, not a JSON-RPC error."""
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {}}, req_id=1)]
+async def test_refers_to_missing_module(server: RpcServer):
+    """refers_to with missing fqn returns isError:true, not a JSON-RPC error."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"kind": "callers"}}, req_id=1)]
     responses = await _run(server, lines)
     assert "result" in responses[0]
     assert responses[0]["result"]["isError"] is True
@@ -863,7 +894,7 @@ async def test_tools_list_ignores_cursor_and_omits_next_cursor(server: RpcServer
     result = responses[0]["result"]
     assert "tools" in result
     assert "nextCursor" not in result
-    assert len(result["tools"]) == 10
+    assert len(result["tools"]) == 9
 
 
 @pytest.mark.asyncio
@@ -1022,17 +1053,15 @@ async def test_notification_handler_raises_silent(server: RpcServer):
     "name,arguments,expect_error",
     [
         # Wrong-type fqn: truthy values that aren't in the graph.
-        # The not-in-graph check fires before _bfs → isError:true.
-        ("callers_of",     {"fqn": 123},                             True),
+        # The not-in-graph check fires before BFS → isError:true.
+        ("refers_to",      {"fqn": 123},                             True),
         ("callees_of",     {"fqn": 123},                             True),
-        # Non-string module: str.startswith raises TypeError → isError:true.
-        ("module_callers", {"module": True},                         True),
         # List-typed module: unhashable → TypeError on dict lookup → isError:true.
         ("module_callees", {"module": ["pkg", "mod"]},               True),
         # Non-string query: `.lower()` on dict raises AttributeError → isError:true.
         ("search",         {"query": {"nested": 1}},                 True),
         # Non-int depth: int("deep") raises ValueError → isError:true.
-        ("callers_of",     {"fqn": "pkg.mod.foo", "depth": "deep"},  True),
+        ("refers_to",      {"fqn": "pkg.mod.foo", "depth": "deep"},  True),
         ("callees_of",     {"fqn": "pkg.mod.foo", "depth": "deep"},  True),
     ],
 )

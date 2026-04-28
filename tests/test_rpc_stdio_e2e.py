@@ -98,7 +98,7 @@ def test_stdio_multiple_requests(index_path: Path) -> None:
         r2 = _recv(proc)
         assert r2["id"] == 2
         tools = r2["result"]["tools"]
-        assert len(tools) == 10
+        assert len(tools) == 9
         assert all("name" in t and "inputSchema" in t for t in tools)
 
         # Third request — ping.
@@ -481,7 +481,7 @@ def test_file_skeleton_stale_e2e_wire(tmp_path: Path) -> None:
 
 
 def test_callers_of_stale_e2e_wire(tmp_path: Path) -> None:
-    """E2E: build real index, modify source file, call callers_of → stale: true over the wire."""
+    """E2E: build real index, modify source file, call refers_to → stale: true over the wire."""
     pkg = tmp_path / "mypkg"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
@@ -529,7 +529,7 @@ def test_callers_of_stale_e2e_wire(tmp_path: Path) -> None:
 
         _send(proc, {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.foo"}},
+            "params": {"name": "refers_to", "arguments": {"fqn": "mypkg.core.foo", "kind": "callers"}},
         })
         r = _recv(proc)
         assert r["id"] == 2
@@ -552,7 +552,7 @@ def test_callers_of_stale_e2e_wire(tmp_path: Path) -> None:
 
 
 def test_callers_of_fqn_not_in_graph_e2e(index_path: Path) -> None:
-    """E2E: callers_of with a nonexistent FQN returns isError:true + error_reason over real stdio pipes."""
+    """E2E: refers_to with a nonexistent FQN returns isError:true + error_reason over real stdio pipes."""
     repo_root = Path(__file__).resolve().parents[1]
     env = dict(os.environ, PYTHONPATH=str(repo_root / "src"))
     proc = subprocess.Popen(
@@ -577,10 +577,10 @@ def test_callers_of_fqn_not_in_graph_e2e(index_path: Path) -> None:
         assert r["id"] == 1
         _send(proc, {"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-        # Call callers_of with a FQN that cannot be in the index
+        # Call refers_to with a FQN that cannot be in the index
         _send(proc, {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "callers_of", "arguments": {"fqn": "no.such.fqn.at.all"}},
+            "params": {"name": "refers_to", "arguments": {"fqn": "no.such.fqn.at.all", "kind": "callers"}},
         })
         r = _recv(proc)
         assert r["id"] == 2
@@ -694,7 +694,7 @@ def test_completeness_field_e2e(tmp_path: Path) -> None:
         # foo's callers include bar, which has missed dynamic calls → partial
         _send(proc, {
             "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.foo"}},
+            "params": {"name": "refers_to", "arguments": {"fqn": "mypkg.core.foo", "kind": "callers"}},
         })
         r2 = _recv(proc)
         assert r2["id"] == 2
@@ -706,10 +706,10 @@ def test_completeness_field_e2e(tmp_path: Path) -> None:
         )
 
         # bar has no callers and no missed_callers entry for bar-as-callee → complete
-        # (bar IS in the graph as a caller of foo, so callers_of(bar) returns results:[])
+        # (bar IS in the graph as a caller of foo, so refers_to(bar) returns results:[])
         _send(proc, {
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "callers_of", "arguments": {"fqn": "mypkg.core.bar"}},
+            "params": {"name": "refers_to", "arguments": {"fqn": "mypkg.core.bar", "kind": "callers"}},
         })
         r3 = _recv(proc)
         assert r3["id"] == 3

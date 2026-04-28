@@ -47,22 +47,6 @@ class StatsResult(TypedDict):
     head_git_sha: NotRequired[str | None]
 
 
-class CallersResult(TypedDict):
-    """Return shape for :meth:`CallGraphIndex.callers_of`."""
-
-    results: list[str]
-    truncated: bool
-    dropped: int  # number of results cut by the cap; 0 when cap does not fire
-    completeness: Completeness
-    stale: bool
-    stale_files: list[str]
-    stale_action: NotRequired[str]
-    index_stale_reason: NotRequired[str]
-    commit_stale: NotRequired[bool | None]
-    index_git_sha: NotRequired[str | None]
-    head_git_sha: NotRequired[str | None]
-
-
 class CalleesResult(TypedDict):
     """Return shape for :meth:`CallGraphIndex.callees_of`."""
 
@@ -80,10 +64,51 @@ class CalleesResult(TypedDict):
 
 
 class ModuleResult(TypedDict):
-    """Return shape for :meth:`CallGraphIndex.module_callers` and
-    :meth:`CallGraphIndex.module_callees`."""
+    """Return shape for :meth:`CallGraphIndex.module_callees`."""
 
     results: list[str]
+    truncated: bool
+    dropped: int  # number of results cut by the cap; 0 when cap does not fire
+    completeness: Completeness
+    stale: bool
+    stale_files: list[str]
+    stale_action: NotRequired[str]
+    index_stale_reason: NotRequired[str]
+    commit_stale: NotRequired[bool | None]
+    index_git_sha: NotRequired[str | None]
+    head_git_sha: NotRequired[str | None]
+
+
+# Reference context kinds for refers_to.
+RefContext = Literal["call", "import", "except", "annotation", "isinstance"]
+
+
+class ReferencedByEntry(TypedDict):
+    """One entry in refers_to results for granularity="function".
+
+    ``fqn`` is the fully-qualified name of the referencing function.
+    ``context`` is the highest-priority reference kind found (``"call"`` wins).
+    ``depth`` is the BFS hop depth at which this entry was first reached.
+    """
+
+    fqn: str
+    context: str  # RefContext value
+    depth: int
+
+
+class ReferencedByResult(TypedDict):
+    """Return shape for :meth:`CallGraphIndex.refers_to`.
+
+    ``results`` is:
+    - For ``granularity="function"``: list of :class:`ReferencedByEntry` dicts.
+    - For ``granularity="module"``: flat list of module FQN strings.
+
+    ``completeness`` retains its existing meaning (unresolved dynamic-dispatch
+    call edges only). It does NOT signal missing wildcard-import references
+    (those are silently excluded — see issue #74).
+    """
+
+    results: list  # list[ReferencedByEntry] or list[str]
     truncated: bool
     dropped: int  # number of results cut by the cap; 0 when cap does not fire
     completeness: Completeness

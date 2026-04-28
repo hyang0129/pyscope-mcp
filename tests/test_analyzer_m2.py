@@ -5,12 +5,9 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
 
 from pyscope_mcp.analyzer import (
     _build_import_table,
-    _EdgeVisitor,
-    _collect_defs,
     build_raw,
 )
 

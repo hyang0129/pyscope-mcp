@@ -174,11 +174,11 @@ def test_saved_payload_has_git_sha_and_content_hash_keys(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 def test_callers_of_has_dropped_field(tmp_path: Path) -> None:
-    """callers_of result always contains a 'dropped' key (0 when not truncated)."""
+    """refers_to result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
     idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
-    result = idx.callers_of("pkg.mod.bar", depth=1)
-    assert "dropped" in result, "callers_of must include 'dropped' in result dict"
+    result = idx.refers_to("pkg.mod.bar", kind="callers", depth=1)
+    assert "dropped" in result, "refers_to must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
     assert result["dropped"] == 0  # small fixture, no truncation
 
@@ -194,11 +194,11 @@ def test_callees_of_has_dropped_field(tmp_path: Path) -> None:
 
 
 def test_module_callers_has_dropped_field(tmp_path: Path) -> None:
-    """module_callers result always contains a 'dropped' key (0 when not truncated)."""
+    """refers_to(module) result always contains a 'dropped' key (0 when not truncated)."""
     raw = _make_minimal_raw()
     idx = CallGraphIndex.from_nodes(str(tmp_path), make_nodes(raw))
-    result = idx.module_callers("pkg.mod", depth=1)
-    assert "dropped" in result, "module_callers must include 'dropped' in result dict"
+    result = idx.refers_to("pkg.mod.bar", kind="callers", granularity="module", depth=1)
+    assert "dropped" in result, "refers_to(module) must include 'dropped' in result dict"
     assert isinstance(result["dropped"], int)
     assert result["dropped"] == 0
 
@@ -286,15 +286,15 @@ def _server_with_index(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_rpc_callers_of_response_has_dropped(_server_with_index) -> None:
-    """callers_of tool response JSON must include 'dropped' key."""
-    lines = [_req("tools/call", {"name": "callers_of", "arguments": {"fqn": "pkg.mod.bar"}}, req_id=1)]
+    """refers_to tool response JSON must include 'dropped' key."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers"}}, req_id=1)]
     responses = await _run_server(_server_with_index, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
     payload = json.loads(r["content"][0]["text"])
     assert "dropped" in payload, (
-        "callers_of RPC response must include 'dropped' field — "
-        "types.CallersResult was updated in issue #62 but server serialisation may be missing it"
+        "refers_to RPC response must include 'dropped' field — "
+        "types.ReferencedByResult was updated in issue #71 but server serialisation may be missing it"
     )
     assert isinstance(payload["dropped"], int)
     assert payload["dropped"] == 0  # small fixture, no cap triggered
@@ -317,14 +317,14 @@ async def test_rpc_callees_of_response_has_dropped(_server_with_index) -> None:
 
 @pytest.mark.asyncio
 async def test_rpc_module_callers_response_has_dropped(_server_with_index) -> None:
-    """module_callers tool response JSON must include 'dropped' key."""
-    lines = [_req("tools/call", {"name": "module_callers", "arguments": {"module": "pkg.mod"}}, req_id=1)]
+    """refers_to(module) tool response JSON must include 'dropped' key."""
+    lines = [_req("tools/call", {"name": "refers_to", "arguments": {"fqn": "pkg.mod.bar", "kind": "callers", "granularity": "module"}}, req_id=1)]
     responses = await _run_server(_server_with_index, lines)
     r = responses[0]["result"]
     assert r["isError"] is False
     payload = json.loads(r["content"][0]["text"])
     assert "dropped" in payload, (
-        "module_callers RPC response must include 'dropped' field"
+        "refers_to(module) RPC response must include 'dropped' field"
     )
     assert isinstance(payload["dropped"], int)
     assert payload["dropped"] == 0

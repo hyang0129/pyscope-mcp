@@ -174,7 +174,7 @@ class TestB1FqnNotFoundErrorPropagation:
     # ------------------------------------------------------------------
 
     def test_graph_callers_of_bad_fqn_returns_is_error(self, tmp_path: Path) -> None:
-        """[B1-graph] callers_of with absent FQN returns isError:True dict.
+        """[B1-graph] refers_to with absent FQN returns isError:True dict.
 
         Verifies the graph-layer contract in isolation: the dict must have
         isError=True and error_reason="fqn_not_in_graph".  Stale must be
@@ -187,11 +187,11 @@ class TestB1FqnNotFoundErrorPropagation:
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
-            result = idx.callers_of("does.not.exist", depth=1)
+            result = idx.refers_to("does.not.exist", kind="callers", depth=1)
 
         # Assert
         assert result.get("isError") is True, (
-            "callers_of must return isError:True for an absent FQN"
+            "refers_to must return isError:True for an absent FQN"
         )
         assert result.get("error_reason") == "fqn_not_in_graph", (
             f"error_reason must be 'fqn_not_in_graph', got {result.get('error_reason')!r}"
@@ -234,7 +234,7 @@ class TestB1FqnNotFoundErrorPropagation:
     def test_graph_callers_of_known_fqn_zero_callers_returns_empty_results(
         self, tmp_path: Path
     ) -> None:
-        """[B1-graph] callers_of a known FQN with zero callers returns results:[] not isError.
+        """[B1-graph] refers_to a known FQN with zero callers returns results:[] not isError.
 
         Negative case: the isError path must NOT trigger when the FQN is present
         but simply has no callers.
@@ -245,15 +245,15 @@ class TestB1FqnNotFoundErrorPropagation:
 
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
-            result = idx.callers_of("pkg.other.gamma", depth=1)
+            result = idx.refers_to("pkg.other.gamma", kind="callers", depth=1)
 
         # Assert
         assert result.get("isError") is not True, (
-            "callers_of must NOT set isError for a known FQN with zero callers"
+            "refers_to must NOT set isError for a known FQN with zero callers"
         )
-        assert "results" in result, "callers_of must include 'results' key"
+        assert "results" in result, "refers_to must include 'results' key"
         assert result["results"] == [], (
-            "callers_of for a node with zero callers must return results:[]"
+            "refers_to for a node with zero callers must return results:[]"
         )
 
     def test_graph_callees_of_known_fqn_zero_callees_returns_empty_results(
@@ -303,9 +303,9 @@ class TestB1FqnNotFoundErrorPropagation:
     async def test_server_dispatch_callers_of_bad_fqn_is_error_true(
         self, tmp_path: Path
     ) -> None:
-        """[B1-server] _dispatch_tool('callers_of', bad FQN) surfaces isError:true.
+        """[B1-server] _dispatch_tool('refers_to', bad FQN) surfaces isError:true.
 
-        Verifies the server.py isError-check path for callers_of:
+        Verifies the server.py isError-check path for refers_to:
           result.get("isError") → True  ⟹  MCP response isError:True
         The content text must be valid JSON and must contain error_reason.
         """
@@ -318,7 +318,7 @@ class TestB1FqnNotFoundErrorPropagation:
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
             response = await _srv._dispatch_tool(
-                "callers_of", {"fqn": "no.such.function"}
+                "refers_to", {"fqn": "no.such.function", "kind": "callers"}
             )
 
         # Assert
@@ -385,7 +385,7 @@ class TestB1FqnNotFoundErrorPropagation:
     async def test_server_dispatch_callers_of_known_fqn_is_error_false(
         self, tmp_path: Path
     ) -> None:
-        """[B1-server] _dispatch_tool('callers_of', known FQN) returns isError:false.
+        """[B1-server] _dispatch_tool('refers_to', known FQN) returns isError:false.
 
         Negative case: server must NOT set isError:true for a valid FQN that
         simply has zero callers.  Verifies the _text() path is taken instead.
@@ -399,7 +399,7 @@ class TestB1FqnNotFoundErrorPropagation:
         # Act
         with patch("subprocess.run", return_value=_git_fail()):
             response = await _srv._dispatch_tool(
-                "callers_of", {"fqn": "pkg.other.gamma"}
+                "refers_to", {"fqn": "pkg.other.gamma", "kind": "callers"}
             )
 
         # Assert
@@ -419,10 +419,10 @@ class TestB1FqnNotFoundErrorPropagation:
     async def test_rpc_callers_of_bad_fqn_is_error_true(
         self, _wired_server
     ) -> None:
-        """[B1-rpc] callers_of with absent FQN: full RPC loop propagates isError:true.
+        """[B1-rpc] refers_to with absent FQN: full RPC loop propagates isError:true.
 
         Exercises: JSON-RPC request → _SERVER._loop → _tools_call →
-        _dispatch_tool("callers_of") → isError check → MCP response with
+        _dispatch_tool("refers_to") → isError check → MCP response with
         isError:true and error_reason in content JSON.
         """
         server, srv, _ = _wired_server
@@ -431,7 +431,7 @@ class TestB1FqnNotFoundErrorPropagation:
         lines = [
             _rpc_req(
                 "tools/call",
-                {"name": "callers_of", "arguments": {"fqn": "absolute.garbage.fqn"}},
+                {"name": "refers_to", "arguments": {"fqn": "absolute.garbage.fqn", "kind": "callers"}},
                 req_id=1,
             )
         ]
@@ -513,7 +513,7 @@ class TestB1FqnNotFoundErrorPropagation:
     async def test_rpc_callers_of_valid_fqn_is_error_false(
         self, _wired_server
     ) -> None:
-        """[B1-rpc] callers_of with a valid FQN: full RPC loop does NOT set isError.
+        """[B1-rpc] refers_to with a valid FQN: full RPC loop does NOT set isError.
 
         Negative-path test: ensures the isError propagation is gated correctly
         and a well-formed FQN with zero callers does not accidentally surface as
@@ -525,7 +525,7 @@ class TestB1FqnNotFoundErrorPropagation:
         lines = [
             _rpc_req(
                 "tools/call",
-                {"name": "callers_of", "arguments": {"fqn": "pkg.other.gamma"}},
+                {"name": "refers_to", "arguments": {"fqn": "pkg.other.gamma", "kind": "callers"}},
                 req_id=4,
             )
         ]

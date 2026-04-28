@@ -236,9 +236,9 @@ class TestSliceNotFoundErrorReasonWiring:
     def test_callers_of_bad_fqn_is_error_with_error_reason(
         self, built_index
     ) -> None:
-        """[wiring] callers_of(bad_fqn) → isError:true, error_reason present, stale=false, no stale_action.
+        """[wiring] refers_to(bad_fqn) → isError:true, error_reason present, stale=false, no stale_action.
 
-        AC2: callers_of with an FQN not in the graph must return the not-found
+        AC2: refers_to with an FQN not in the graph must return the not-found
         error shape — not an empty results list and not a server crash.
         """
         index_file, pkg_root, _, _ = built_index
@@ -251,8 +251,8 @@ class TestSliceNotFoundErrorReasonWiring:
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {
-                    "name": "callers_of",
-                    "arguments": {"fqn": "mypkg.does_not_exist.whatever"},
+                    "name": "refers_to",
+                    "arguments": {"fqn": "mypkg.does_not_exist.whatever", "kind": "callers"},
                 },
             })
             r = _recv(proc)
@@ -265,7 +265,7 @@ class TestSliceNotFoundErrorReasonWiring:
 
             # [Assert] MCP tool level: isError:true
             assert result.get("isError") is True, (
-                f"callers_of with bad FQN must return isError:true; got {result}"
+                f"refers_to with bad FQN must return isError:true; got {result}"
             )
 
             # [Assert] content is parseable JSON with error_reason
@@ -407,7 +407,7 @@ class TestSliceNotFoundErrorReasonWiring:
     def test_callers_of_present_fqn_with_zero_callers_is_not_error(
         self, built_index
     ) -> None:
-        """[wiring] AC5 regression guard: callers_of(present-but-no-callers FQN) → isError NOT true, results list present.
+        """[wiring] AC5 regression guard: refers_to(present-but-no-callers FQN) → isError NOT true, results list present.
 
         mypkg.core.gamma is in the index (so isError must NOT be true) but
         nothing calls gamma, so results must be a list (possibly empty).
@@ -424,8 +424,8 @@ class TestSliceNotFoundErrorReasonWiring:
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {
-                    "name": "callers_of",
-                    "arguments": {"fqn": "mypkg.core.gamma"},
+                    "name": "refers_to",
+                    "arguments": {"fqn": "mypkg.core.gamma", "kind": "callers"},
                 },
             })
             r = _recv(proc)
@@ -438,14 +438,14 @@ class TestSliceNotFoundErrorReasonWiring:
 
             # [Assert] isError must NOT be true for a present FQN
             assert result.get("isError") is not True, (
-                "callers_of with a present FQN (gamma) must NOT return isError:true — "
+                "refers_to with a present FQN (gamma) must NOT return isError:true — "
                 "zero callers is not an error; got isError=True"
             )
 
             # [Assert] content is parseable JSON and includes 'results' key
             body = json.loads(result["content"][0]["text"])
             assert "results" in body, (
-                "callers_of(gamma) must include 'results' key in response body"
+                "refers_to(gamma) must include 'results' key in response body"
             )
             assert isinstance(body["results"], list), (
                 f"results must be a list, got {type(body['results'])}"
@@ -453,7 +453,7 @@ class TestSliceNotFoundErrorReasonWiring:
 
             # [Assert] stale is present (and False for fresh index)
             assert "stale" in body, (
-                "callers_of response must include 'stale' key"
+                "refers_to response must include 'stale' key"
             )
 
             _shutdown(proc)
@@ -533,9 +533,9 @@ class TestSliceNotFoundErrorReasonArtifact:
 
     @pytest.mark.integration_artifact
     def test_callers_of_bad_fqn_exact_error_reason(self, built_index) -> None:
-        """[artifact] callers_of(bad_fqn) → error_reason=='fqn_not_in_graph', stale==False, stale_files==[], no stale_action.
+        """[artifact] refers_to(bad_fqn) → error_reason=='fqn_not_in_graph', stale==False, stale_files==[], no stale_action.
 
-        Golden: error_reason='fqn_not_in_graph' (defined in graph.py callers_of).
+        Golden: error_reason='fqn_not_in_graph' (defined in graph.py refers_to).
         """
         index_file, pkg_root, _, _ = built_index
         proc = _spawn_server(index_file, root=pkg_root)
@@ -547,8 +547,8 @@ class TestSliceNotFoundErrorReasonArtifact:
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {
-                    "name": "callers_of",
-                    "arguments": {"fqn": "mypkg.does_not_exist.whatever"},
+                    "name": "refers_to",
+                    "arguments": {"fqn": "mypkg.does_not_exist.whatever", "kind": "callers"},
                 },
             })
             r = _recv(proc)
@@ -691,7 +691,7 @@ class TestSliceNotFoundErrorReasonArtifact:
     def test_callers_of_present_fqn_with_zero_callers_exact_values(
         self, built_index
     ) -> None:
-        """[artifact] AC5: callers_of(gamma) → results==[], stale==False exactly.
+        """[artifact] AC5: refers_to(gamma) → results==[], stale==False exactly.
 
         mypkg.core.gamma is present in the index (it calls beta) but nothing
         calls gamma itself.  The response must be a success (isError NOT true)
@@ -707,8 +707,8 @@ class TestSliceNotFoundErrorReasonArtifact:
             _send(proc, {
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": {
-                    "name": "callers_of",
-                    "arguments": {"fqn": "mypkg.core.gamma"},
+                    "name": "refers_to",
+                    "arguments": {"fqn": "mypkg.core.gamma", "kind": "callers"},
                 },
             })
             r = _recv(proc)
@@ -716,7 +716,7 @@ class TestSliceNotFoundErrorReasonArtifact:
 
             # [Assert] isError must NOT be true
             assert result.get("isError") is not True, (
-                "callers_of(gamma) must NOT be isError:true — "
+                "refers_to(gamma) must NOT be isError:true — "
                 "gamma is present in the index; zero callers is not an error"
             )
 
@@ -724,7 +724,7 @@ class TestSliceNotFoundErrorReasonArtifact:
 
             # [Assert] results is exactly [] (golden: gamma has no callers)
             assert body["results"] == [], (
-                f"callers_of(gamma) must return results=[] since nothing calls gamma; "
+                f"refers_to(gamma) must return results=[] since nothing calls gamma; "
                 f"got {body['results']!r}"
             )
 

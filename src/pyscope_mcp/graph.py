@@ -10,10 +10,11 @@ from typing import TypedDict
 
 from pyscope_mcp.types import (
     CalleesResult,
-    CallersResult,
     Completeness,
     ModuleResult,
     NeighborhoodResult,
+    ReferencedByEntry,
+    ReferencedByResult,
     SearchResult,
     StatsResult,
 )
@@ -650,24 +651,61 @@ class CallGraphIndex:
             key=lambda n: (bfs_result[n], -degree_cache[n], n),
         )
 
-    def callers_of(self, fqn: str, depth: int = 1) -> CallersResult:
-        """Return functions that (transitively, up to depth) call *fqn*.
+    def refers_to(
+        self,
+        fqn: str,
+        kind: str = "all",
+        granularity: str = "function",
+        depth: int = 1,
+    ) -> ReferencedByResult:
+        """Return all typed AST references to *fqn* across the codebase.
 
-        Results are capped at 50; ``truncated`` signals when the cap fires.
-        ``dropped`` is the number of results cut by the cap (always present; 0
-        when the cap does not fire).  Results are ranked by
-        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 callers
-        always precede depth-2 ones regardless of alphabetical order.
-        Response includes uniform staleness fields (``stale``, ``stale_files``,
-        and optionally ``stale_action`` / ``index_stale_reason``) and a
-        ``completeness`` field (``"complete"`` or ``"partial"``).
+        Replaces the deleted ``callers_of`` (call-only) and ``module_callers``
+        (module-level call-only).  Covers all reference kinds stored in
+        ``nodes[fqn]["called_by"]``: ``"call"``, ``"import"``, ``"except"``,
+        ``"annotation"``, ``"isinstance"``.
 
-        If *fqn* is not present in the graph at all, returns an error dict
-        with ``isError: True``, ``error_reason: "fqn_not_in_graph"``, and
-        ``stale: False``.  An FQN that is present but has zero callers returns
-        ``results: []`` (not an error).
+        Parameters
+        ----------
+        fqn:
+            Fully-qualified name of the symbol to look up.
+        kind:
+            ``"all"`` — all reference kinds (default, for refactor safety).
+            ``"callers"`` — call edges only (replaces ``callers_of``).
+        granularity:
+            ``"function"`` — results are ``{fqn, context, depth}`` dicts
+            (default).  Each function appears once; ``"call"`` context wins
+            when a function references the symbol in multiple ways.
+            ``"module"`` — flat deduplicated list of module FQN strings
+            (replaces ``module_callers`` when used with ``kind="callers"``).
+        depth:
+            BFS hop depth (1 or 2).  Depth > 2 returns an error.  Depth > 1
+            traverses transitively through the ``"call"`` edges in the reverse
+            function graph (same BFS as the deleted ``callers_of``) for
+            ``kind="callers"``, and through the nodes dict for ``kind="all"``.
+
+        Returns
+        -------
+        :class:`ReferencedByResult` with ``results``, ``truncated``,
+        ``dropped``, ``completeness``, and staleness fields.
+
+        Error shapes
+        ------------
+        - ``fqn`` not in ``nodes``: ``{isError: true, error_reason:
+          "fqn_not_in_graph", stale: false, stale_files: []}``
+        - ``depth > 2``: ``{isError: true, error_reason: "depth_exceeds_max"}``
+        - FQN present, zero references: ``{results: [], ...}`` — not an error.
+
+        NOTE: Wildcard imports (``from module import *``) are not tracked and
+        are silently absent from results. See issue #74.
         """
-        if fqn not in self.function_graph.nodes:
+        if depth > 2:
+            return {  # type: ignore[return-value]
+                "isError": True,
+                "error_reason": "depth_exceeds_max",
+            }
+
+        if fqn not in self.nodes:
             commit = self._commit_staleness()
             return {  # type: ignore[return-value]
                 "isError": True,
@@ -676,19 +714,100 @@ class CallGraphIndex:
                 "stale_files": [],
                 **commit,
             }
-        rev_fg = self.function_graph.reverse(copy=False)
-        bfs_result = _bfs(rev_fg, fqn, depth)
-        ranked = self._rank_bfs_results(bfs_result, rev_fg)
-        dropped = max(0, len(ranked) - self._CALLERS_CALLEES_CAP)
+
+        if kind == "callers":
+            # Reuse existing call-edge BFS on the reversed function_graph.
+            rev_fg = self.function_graph.reverse(copy=False)
+            bfs_result = _bfs(rev_fg, fqn, depth)
+            ranked_fqns = self._rank_bfs_results(bfs_result, rev_fg)
+            dropped = max(0, len(ranked_fqns) - self._CALLERS_CALLEES_CAP)
+            truncated = dropped > 0
+            ranked_fqns = ranked_fqns[: self._CALLERS_CALLEES_CAP]
+
+            if granularity == "module":
+                module_results = _dedup_modules(ranked_fqns)
+                staleness = self._staleness_for_modules(module_results)
+                symbol_fqns = self._expand_modules_to_symbols(module_results)
+                commit = self._commit_staleness()
+                return ReferencedByResult(
+                    results=module_results,
+                    truncated=truncated,
+                    dropped=dropped,
+                    completeness=self.completeness_for(symbol_fqns),
+                    **staleness,  # type: ignore[arg-type]
+                    **commit,  # type: ignore[arg-type]
+                )
+
+            # granularity == "function"
+            entries: list[ReferencedByEntry] = [
+                ReferencedByEntry(fqn=f, context="call", depth=bfs_result[f])
+                for f in ranked_fqns
+            ]
+            staleness = self._staleness_for(ranked_fqns)
+            commit = self._commit_staleness()
+            return ReferencedByResult(
+                results=entries,
+                truncated=truncated,
+                dropped=dropped,
+                completeness=self.completeness_for(ranked_fqns),
+                **staleness,  # type: ignore[arg-type]
+                **commit,  # type: ignore[arg-type]
+            )
+
+        # kind == "all" — walk nodes["called_by"] for all edge kinds.
+        # Context priority: "call" > all other kinds (first-encountered non-call).
+        _CONTEXT_PRIORITY = ("call", "import", "except", "annotation", "isinstance")
+        bfs_all = _bfs_nodes_called_by(self.nodes, fqn, depth)
+        # bfs_all: dict[referencing_fqn -> (min_hop, {kind: hop_at_which_seen})]
+        # Rank by (hop ASC, -total_degree DESC, fqn ASC).
+        # total_degree from function_graph (call edges only — proxy for importance).
+        fg = self.function_graph
+
+        def _total_degree_all(n: str) -> int:
+            out_d = sum(1 for _ in fg.successors(n))
+            in_d = len(fg._pred.get(n, ()))
+            return out_d + in_d
+
+        sorted_fqns = sorted(
+            bfs_all,
+            key=lambda n: (bfs_all[n][0], -_total_degree_all(n), n),
+        )
+        dropped = max(0, len(sorted_fqns) - self._CALLERS_CALLEES_CAP)
         truncated = dropped > 0
-        results = ranked[: self._CALLERS_CALLEES_CAP]
-        staleness = self._staleness_for(results)
+        sorted_fqns = sorted_fqns[: self._CALLERS_CALLEES_CAP]
+
+        if granularity == "module":
+            module_results = _dedup_modules(sorted_fqns)
+            staleness = self._staleness_for_modules(module_results)
+            symbol_fqns = self._expand_modules_to_symbols(module_results)
+            commit = self._commit_staleness()
+            return ReferencedByResult(
+                results=module_results,
+                truncated=truncated,
+                dropped=dropped,
+                completeness=self.completeness_for(symbol_fqns),
+                **staleness,  # type: ignore[arg-type]
+                **commit,  # type: ignore[arg-type]
+            )
+
+        # granularity == "function" — pick highest-priority context per FQN.
+        entries = []
+        for ref_fqn in sorted_fqns:
+            hop, kinds_seen = bfs_all[ref_fqn]
+            chosen_context = "import"  # fallback if no call kind present
+            for ctx in _CONTEXT_PRIORITY:
+                if ctx in kinds_seen:
+                    chosen_context = ctx
+                    break
+            entries.append(ReferencedByEntry(fqn=ref_fqn, context=chosen_context, depth=hop))
+
+        staleness = self._staleness_for(sorted_fqns)
         commit = self._commit_staleness()
-        return CallersResult(
-            results=results,
+        return ReferencedByResult(
+            results=entries,
             truncated=truncated,
             dropped=dropped,
-            completeness=self.completeness_for(results),
+            completeness=self.completeness_for(sorted_fqns),
             **staleness,  # type: ignore[arg-type]
             **commit,  # type: ignore[arg-type]
         )
@@ -974,44 +1093,6 @@ class CallGraphIndex:
             key=lambda n: (bfs_result[n], -degree_cache[n], n),
         )
 
-    def module_callers(self, module: str, depth: int = 1) -> ModuleResult:
-        """Return callers of all modules whose FQN starts with *module* (prefix query).
-
-        An exact FQN is a degenerate prefix and behaves identically to the
-        pre-change implementation.  Results are capped at 50 items; the
-        ``truncated`` key in the returned dict signals when the cap triggers.
-        ``dropped`` is the number of results cut by the cap (always present; 0
-        when the cap does not fire).  Results are ranked by
-        ``(hop_depth ASC, -total_degree DESC, fqn ASC)`` so depth-1 module
-        callers always precede depth-2 ones regardless of alphabetical order.
-        An empty-string prefix matches all modules.  A prefix that matches no
-        module nodes returns ``{"results": [], "truncated": false, "dropped": 0, ...}``.
-
-        Staleness is result-scoped: module FQNs are expanded to file paths via
-        prefix-matching against ``_fqn_to_file`` (find all symbol FQNs that start
-        with ``result_module + "."``).  Completeness is computed over the same
-        expanded symbol FQN set.
-        """
-        base = _prefix_module_bfs(
-            self.module_graph.reverse(copy=False), self.module_graph, module, depth
-        )
-        raw_union: dict[str, int] = base["results"]  # type: ignore[assignment]
-        ranked = self._rank_module_bfs_results(raw_union, self.module_graph)
-        cap = _MODULE_BFS_CAP
-        dropped: int = base["dropped"]  # type: ignore[assignment]
-        result_modules = ranked[:cap]
-        staleness = self._staleness_for_modules(result_modules)
-        symbol_fqns = self._expand_modules_to_symbols(result_modules)
-        commit = self._commit_staleness()
-        return ModuleResult(
-            results=result_modules,
-            truncated=base["truncated"],  # type: ignore[typeddict-item]
-            dropped=dropped,
-            completeness=self.completeness_for(symbol_fqns),
-            **staleness,  # type: ignore[arg-type]
-            **commit,  # type: ignore[arg-type]
-        )
-
     def module_callees(self, module: str, depth: int = 1) -> ModuleResult:
         """Return callees of all modules whose FQN starts with *module* (prefix query).
 
@@ -1049,6 +1130,11 @@ class CallGraphIndex:
         """
         symbol_fqns: list[str] = []
         for mod in module_fqns:
+            if not isinstance(mod, str):
+                raise TypeError(
+                    f"_expand_modules_to_symbols expects str elements, "
+                    f"got {type(mod)!r}: {mod!r}"
+                )
             prefix = mod + "."
             for fqn in self._fqn_to_file:
                 if fqn.startswith(prefix):
@@ -1205,3 +1291,81 @@ def _bfs(g: _DiGraph | _DiGraphReverseView, start: str, depth: int) -> dict[str,
                     nxt.append(s)
         frontier = nxt
     return seen
+
+
+def _bfs_nodes_called_by(
+    nodes: dict[str, dict],
+    start: str,
+    depth: int,
+) -> dict[str, tuple[int, dict[str, int]]]:
+    """BFS over ``nodes[fqn]["called_by"]`` for all reference kinds.
+
+    Used by :meth:`CallGraphIndex.refers_to` with ``kind="all"`` to traverse
+    all typed reference edges (``call``, ``import``, ``except``,
+    ``annotation``, ``isinstance``) stored in the site-keyed nodes dict.
+
+    Unlike :func:`_bfs` (which operates on a :class:`_DiGraph` containing only
+    call edges), this function walks the ``nodes`` dict directly so that
+    non-call edge kinds are included.
+
+    Returns a mapping of
+    ``{referencing_fqn -> (min_hop_depth, {kind -> hop_at_first_seen})}``
+    where ``min_hop_depth`` is the minimum hop at which the FQN was reached
+    across all kinds.  A referencing FQN may appear under multiple kinds;
+    ``min_hop_depth`` is the minimum across them.
+
+    ``depth=0`` returns ``{}``.  ``depth=1`` returns direct references only.
+    ``depth=2`` traverses through call-only edges (``called_by["call"]``) to
+    find hop-2 references.
+    """
+    if depth <= 0 or start not in nodes:
+        return {}
+
+    # seen: referencing_fqn -> (min_hop, {kind: hop_at_first_seen})
+    seen: dict[str, tuple[int, dict[str, int]]] = {}
+
+    # Hop 1: collect all referencing FQNs from nodes[start]["called_by"]
+    hop1_callers: set[str] = set()
+    called_by = nodes[start].get("called_by", {}) or {}
+    for kind, referrers in called_by.items():
+        for ref_fqn in referrers:
+            if ref_fqn == start:
+                continue
+            if ref_fqn not in seen:
+                seen[ref_fqn] = (1, {kind: 1})
+                hop1_callers.add(ref_fqn)
+            else:
+                seen[ref_fqn][1][kind] = 1
+
+    if depth == 1:
+        return seen
+
+    # Hop 2: traverse through call-only edges from hop-1 FQNs
+    # (We follow "who calls the hop-1 referrers" via call edges only —
+    # consistent with the callers_of depth-2 semantics.)
+    for ref_fqn in list(hop1_callers):
+        hop2_called_by = nodes.get(ref_fqn, {}).get("called_by", {}) or {}
+        hop2_callers = hop2_called_by.get("call", [])
+        for h2_fqn in hop2_callers:
+            if h2_fqn == start or h2_fqn in hop1_callers:
+                continue
+            if h2_fqn not in seen:
+                seen[h2_fqn] = (2, {"call": 2})
+            else:
+                cur_hop, cur_kinds = seen[h2_fqn]
+                if cur_hop > 2:
+                    seen[h2_fqn] = (2, {**cur_kinds, "call": 2})
+
+    return seen
+
+
+def _dedup_modules(fqns: list[str]) -> list[str]:
+    """Deduplicate function FQNs to their module FQNs (preserving order)."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for fqn in fqns:
+        mod = _module_of(fqn)
+        if mod not in seen:
+            seen.add(mod)
+            result.append(mod)
+    return result

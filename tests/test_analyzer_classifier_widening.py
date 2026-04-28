@@ -10,7 +10,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
 
 from pyscope_mcp.analyzer import build_raw
 from pyscope_mcp.analyzer.misses import classify_miss
