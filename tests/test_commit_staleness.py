@@ -13,7 +13,6 @@ Covers:
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -259,7 +258,6 @@ async def test_build_tool_success(server_with_index, tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_build_tool_concurrent_rejection(server_with_index) -> None:
     """Concurrent build calls: second call returns isError:true immediately."""
-    import asyncio
     srv, _ = server_with_index
     srv._BUILD_LOCK = None  # ensure fresh lock
 

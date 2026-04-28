@@ -18,7 +18,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
 
 from pyscope_mcp.analyzer import build_with_report
 

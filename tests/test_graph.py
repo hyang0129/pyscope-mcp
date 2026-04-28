@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pyscope_mcp.graph import CallGraphIndex
+import pytest
+
+from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
 from conftest import make_nodes
 
 
@@ -858,11 +860,6 @@ def test_neighborhood_hub_fields_always_present_isolated() -> None:
 #   3. ``MissLog.to_dict()`` takes no arguments
 #   4. Deterministic JSON serialisation across insertion orders
 # ---------------------------------------------------------------------------
-
-import pytest
-
-from pyscope_mcp.graph import INDEX_VERSION, CallGraphIndex
-
 
 def _sample_nodes() -> dict[str, dict]:
     return {

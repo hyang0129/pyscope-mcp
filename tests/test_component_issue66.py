@@ -21,7 +21,6 @@ Three cross-module boundaries tested:
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -327,7 +326,6 @@ class TestB3CliToGraph:
         When git rev-parse HEAD succeeds, cmd_build() calls from_raw(..., git_sha=sha)
         and the resulting index must contain that SHA after save+load.
         """
-        from unittest.mock import call
 
         # Create a minimal package structure so the analyzer can run.
         pkg_dir = tmp_path / "mypkg"

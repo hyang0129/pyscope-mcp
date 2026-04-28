@@ -285,7 +285,6 @@ def test_deeply_nested_func_no_double_processing(tmp_path: Path) -> None:
     # inner's scope has o: Other — edge to Other.run from inner is valid but
     # innermost should not inherit it
     # Also verify inner and outer scopes are independent
-    inner_callees = raw.get("pkg.mod.outer.inner", [])
     outer_callees = raw.get("pkg.mod.outer", [])
     # outer binds w: Worker but makes no calls — no Worker.process edge from outer
     assert "pkg.mod.Worker.process" not in outer_callees
@@ -314,7 +313,6 @@ def test_lambda_outer_scope_not_inherited(tmp_path: Path) -> None:
     # NOTE: The runner() call to x.process() IS directly tracked in runner's scope,
     # so we check the lambda scope separately.
     # Lambda doesn't have a named FQN in our scheme — so just check runner:
-    runner_callees = raw.get("pkg.mod.runner", [])
     # runner may resolve x.process() (x is bound there before lambda).
     # But we ensure the lambda body call doesn't somehow create a wrong edge.
     # This test mainly checks that lambda-scoped access doesn't produce false edges

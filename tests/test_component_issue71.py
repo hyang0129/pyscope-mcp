@@ -26,13 +26,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pyscope_mcp.graph import CallGraphIndex
-from conftest import make_nodes
 import pyscope_mcp.server as _srv
 
 

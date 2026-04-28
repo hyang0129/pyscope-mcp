@@ -409,7 +409,6 @@ class TestV5Schema:
 
     @pytest.mark.parametrize("old_version", [1, 2, 3, 4])
     def test_load_rejects_old_versions(self, tmp_path: Path, old_version: int) -> None:
-        from pyscope_mcp.graph import INDEX_VERSION
         payload = {
             "version": old_version,
             "root": "/tmp/test",

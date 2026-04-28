@@ -72,7 +72,7 @@ When adding a new MCP tool that needs graph data, assume the index is already lo
 
 ## MCP tool surface
 
-Currently shipping: `stats`, `reload`, `build`, `callers_of`, `callees_of`, `module_callers`, `module_callees`, `search`, `file_skeleton`, `neighborhood`.
+Currently shipping: `stats`, `reload`, `build`, `refers_to`, `callees_of`, `module_callees`, `search`, `file_skeleton`, `neighborhood`.
 
 Missing but recurring across every other code-graph MCP — add in this order:
 
@@ -98,6 +98,29 @@ Conventions when adding tools:
 - `PYSCOPE_MCP_ROOT` — repo to analyze / serve from (default: cwd).
 - `PYSCOPE_MCP_PACKAGE` — root package name passed to the analyzer (default: root dir name).
 - `PYSCOPE_MCP_INDEX` — index file path (default: `.pyscope-mcp/index.json` relative to root).
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push and PR:
+
+- **Python**: 3.11 (matches dev venv)
+- **Lint**: `ruff check src tests` — must pass with zero errors before tests run
+- **Test**: `pytest -m "not integration_artifact"` — runs all tests except artifact-tier integration tests (those require a built index on disk and are intended for nightly/label runs)
+
+To run the full suite locally including artifact-tier tests:
+
+```bash
+pytest
+```
+
+To run only what CI runs:
+
+```bash
+ruff check src tests
+pytest -m "not integration_artifact"
+```
+
+**Lint discipline**: ruff is configured in `pyproject.toml` (`line-length = 100`, `target-version = "py310"`). Fix violations with `ruff check --fix` before pushing.
 
 ## Testing
 

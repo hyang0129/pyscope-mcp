@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-import pytest
 
 from pyscope_mcp.graph import CallGraphIndex, SymbolSummary
 from conftest import make_nodes

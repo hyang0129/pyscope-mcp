@@ -16,7 +16,6 @@ Test scenarios per the refined spec:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -149,7 +148,7 @@ def _read_log(log_path: Path) -> list[dict]:
     if not log_path.exists():
         return []
     lines = log_path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(l) for l in lines if l.strip()]
+    return [json.loads(line) for line in lines if line.strip()]
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +317,7 @@ async def test_s4_opt_out_no_file_created(server: RpcServer, tmp_index: Path, lo
 
 def test_s5_log_rotation(tmp_path: Path):
     """S5: rotation at LOG_MAX_BYTES, max LOG_BACKUP_COUNT historical files."""
-    from pyscope_mcp._log import LOG_BACKUP_COUNT, LOG_MAX_BYTES, QueryLogger
+    from pyscope_mcp._log import LOG_MAX_BYTES, QueryLogger
 
     log_path = tmp_path / "query.jsonl"
     ql = QueryLogger(log_path)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pyscope_mcp.analyzer import build_raw, build_with_report
+from pyscope_mcp.analyzer import build_with_report
 
 
 def _make_package(tmp_path: Path, pkg_name: str, files: dict[str, str]) -> Path:

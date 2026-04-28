@@ -11,7 +11,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from pyscope_mcp.analyzer import build_raw, build_with_report, _classify_miss
+from pyscope_mcp.analyzer import build_with_report, _classify_miss
 
 
 def _parse_call(src: str) -> ast.Call:

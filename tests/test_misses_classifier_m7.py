@@ -8,7 +8,6 @@ attr chains are NOT stolen by the new whitelists.
 from __future__ import annotations
 
 import ast
-from pathlib import Path
 
 from pyscope_mcp.analyzer import _classify_miss
 
