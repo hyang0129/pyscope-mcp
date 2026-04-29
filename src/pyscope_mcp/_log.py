@@ -9,7 +9,10 @@ writes are deferred to a future follow-up.
 
 Configuration (env vars, read at init time):
   PYSCOPE_MCP_LOG      "1" to enable, "0" to disable.
-                       Defaults to "0" (off). Set to "1" to enable.
+                       Defaults to "1" (on). Set to "0" to disable.
+                       On activation, ``init`` emits a one-time WARNING
+                       through the ``pyscope_mcp._log`` logger so users
+                       see the active log path on stderr at startup.
   PYSCOPE_MCP_LOG_PATH Path to the log file.
                        Default: <index_dir>/.pyscope-mcp/query.jsonl
                        (The .pyscope-mcp/ dir is already .gitignored.)
@@ -212,6 +215,12 @@ def init(log_path: Path) -> None:
 
     Safe to call multiple times; subsequent calls replace the previous instance.
     No-op when ``PYSCOPE_MCP_LOG`` is ``"0"``.
+
+    On activation, emits a one-time WARNING-level log message announcing
+    the active log path. Python's ``logging.lastResort`` handler routes
+    WARNING+ to stderr by default, which makes the announcement visible
+    to a human starting the server even before ``_rpc.RpcServer.run()``
+    has set up its own logging handlers.
     """
     global _LOGGER
     enabled = _is_enabled()
@@ -219,14 +228,22 @@ def init(log_path: Path) -> None:
         _LOGGER = None
         return
     _LOGGER = QueryLogger(log_path)
+    logger.warning(
+        "Query logging enabled (PYSCOPE_MCP_LOG=1 default). "
+        "Logs: %s (rotates at %d MB \u00d7 %d backups). "
+        "Set PYSCOPE_MCP_LOG=0 to disable.",
+        log_path,
+        LOG_MAX_BYTES // (1024 * 1024),
+        LOG_BACKUP_COUNT,
+    )
 
 
 def _is_enabled() -> bool:
     """Return True when logging is enabled.
 
-    Logging is off by default.  Set ``PYSCOPE_MCP_LOG=1`` to enable.
+    Logging is on by default.  Set ``PYSCOPE_MCP_LOG=0`` to disable.
     """
-    return os.environ.get("PYSCOPE_MCP_LOG", "0") not in ("0", "false", "False", "no", "No")
+    return os.environ.get("PYSCOPE_MCP_LOG", "1") not in ("0", "false", "False", "no", "No")
 
 
 def log_call(

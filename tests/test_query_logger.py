@@ -12,6 +12,8 @@ Test scenarios per the refined spec:
   S6 — reload path (index identity updates after reload)
   S7 — logger-failure path (internal I/O error does not affect tool response)
   S8 — index schema v5 round-trip (git_sha + content_hash)
+  S9 — default-on behaviour (PYSCOPE_MCP_LOG unset → logger enabled,
+       activation emits a WARNING with the active log path)
 """
 
 from __future__ import annotations
@@ -529,3 +531,68 @@ def test_s8_different_raw_produces_different_hash(tmp_path: Path):
     idx_a = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_a))
     idx_b = CallGraphIndex.from_nodes(tmp_path, make_nodes(raw_b))
     assert idx_a.content_hash != idx_b.content_hash
+
+
+# ---------------------------------------------------------------------------
+# S9 — default-on behaviour (PYSCOPE_MCP_LOG unset → logger enabled)
+# ---------------------------------------------------------------------------
+
+def test_s9_default_on_when_env_unset(monkeypatch, tmp_path: Path):
+    """S9: PYSCOPE_MCP_LOG unset — logger is enabled (default-on)."""
+    from pyscope_mcp import _log
+
+    # Remove PYSCOPE_MCP_LOG from the environment (if inherited from the shell).
+    monkeypatch.delenv("PYSCOPE_MCP_LOG", raising=False)
+
+    log_path = tmp_path / "query.jsonl"
+    _log.init(log_path)
+
+    assert _log._LOGGER is not None, (
+        "default-on broken: PYSCOPE_MCP_LOG unset should activate the logger"
+    )
+
+
+def test_s9_init_emits_warning_with_log_path(monkeypatch, caplog, tmp_path: Path):
+    """S9: on activation, init emits a WARNING-level message with the log path.
+
+    The WARNING level matters: Python's ``logging.lastResort`` handler routes
+    WARNING+ to stderr by default, so users see the announcement even before
+    ``_rpc.RpcServer.run()`` configures its own handlers.
+    """
+    import logging
+
+    from pyscope_mcp import _log
+
+    monkeypatch.delenv("PYSCOPE_MCP_LOG", raising=False)
+
+    log_path = tmp_path / "query.jsonl"
+    with caplog.at_level(logging.WARNING, logger="pyscope_mcp._log"):
+        _log.init(log_path)
+
+    assert _log._LOGGER is not None
+    matching = [
+        rec for rec in caplog.records
+        if rec.levelno == logging.WARNING and "Query logging enabled" in rec.getMessage()
+    ]
+    assert matching, (
+        f"expected one WARNING-level 'Query logging enabled' record, "
+        f"got: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+    )
+    # The active log path must be in the announcement so users can find the file.
+    assert any(str(log_path) in rec.getMessage() for rec in matching), (
+        f"WARNING did not include the log path {log_path}: "
+        f"{[r.getMessage() for r in matching]}"
+    )
+
+
+def test_s9_explicit_zero_overrides_default(monkeypatch, tmp_path: Path):
+    """S9: PYSCOPE_MCP_LOG=0 still disables, even with the default flipped to on."""
+    from pyscope_mcp import _log
+
+    monkeypatch.setenv("PYSCOPE_MCP_LOG", "0")
+
+    log_path = tmp_path / "query.jsonl"
+    _log.init(log_path)
+
+    assert _log._LOGGER is None
+    assert not log_path.exists()

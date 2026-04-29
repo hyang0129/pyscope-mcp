@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## Unreleased
+
+### Changed
+
+- **Query logger is now on by default.** Previously opt-in via `PYSCOPE_MCP_LOG=1`; now opt-out via `PYSCOPE_MCP_LOG=0`. Measured per-call overhead is ~20 µs (≪0.1% of typical tool latency); rotation caps disk at ~70 MB (10 MB × 5 backups + current). On activation the logger emits a one-time WARNING to stderr announcing the active log path so users notice it without being surprised by an unexpected file. See issue #101 for the benchmark and rationale.
+
 ## 0.1.0 — 2026-04-28
 
 First public release of `pyscope-mcp`.
