@@ -100,11 +100,11 @@ If you are an agent setting up `pyscope-mcp` in a new repo, follow these steps:
 
    You should see node and edge counts in the response. If the output is non-empty the index loaded correctly and the MCP tools are ready to use.
 
-## Query logging (opt-in)
+## Query logging
 
-Every `tools/call` dispatch can append a structured JSONL entry to a local rotating log file so you can measure tool-use patterns, truncation rates, hub-suppression hits, and latency without parsing claude's session transcripts.
+Every `tools/call` dispatch appends a structured JSONL entry to a local rotating log file so you can measure tool-use patterns, truncation rates, hub-suppression hits, and latency without parsing claude's session transcripts.
 
-The logger is **off by default**. Set `PYSCOPE_MCP_LOG=1` to enable.
+The logger is **on by default**. Set `PYSCOPE_MCP_LOG=0` to disable. Per-call overhead is ~20 µs (well under 0.1% of typical tool latency); the rotating file is capped at ~70 MB on disk (10 MB × 5 backups + current). On activation the server emits a one-time WARNING to stderr announcing the active log path so the behavior is never silent.
 
 ### Log location
 
@@ -114,10 +114,10 @@ Override: `PYSCOPE_MCP_LOG_PATH=/abs/path/to/query.jsonl`.
 ### Enable / disable
 
 ```bash
-# Enable
-PYSCOPE_MCP_LOG=1 pyscope-mcp serve ...
+# Enabled by default — no env var needed
+pyscope-mcp serve ...
 
-# Disable explicitly (or leave PYSCOPE_MCP_LOG unset — off is the default)
+# Disable
 PYSCOPE_MCP_LOG=0 pyscope-mcp serve ...
 ```
 
