@@ -98,6 +98,8 @@ Conventions when adding tools:
 - `PYSCOPE_MCP_ROOT` — repo to analyze / serve from (default: cwd).
 - `PYSCOPE_MCP_PACKAGE` — root package name passed to the analyzer (default: root dir name).
 - `PYSCOPE_MCP_INDEX` — index file path (default: `.pyscope-mcp/index.json` relative to root).
+- `PYSCOPE_MCP_LOG` — query logger toggle: `1` on (default), `0` off. On activation, a one-time WARNING to stderr announces the active log path.
+- `PYSCOPE_MCP_LOG_PATH` — query log file path (default: `<index_dir>/query.jsonl`, rotates at 10 MB × 5 backups).
 
 ## CI
 
